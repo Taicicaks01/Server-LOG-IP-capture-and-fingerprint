@@ -1,19 +1,13 @@
-scans common log locations, Docker container logs, systemd/journal, Cloudflared service logs, and SSH/auth logs. Output: a single CSV /root/homelab-fingerprints/YYYYMMDD_fingerprints.csv plus a short summary printed to the terminal. You can run it manually or cron it daily.
+a single-file terminal TUI tool (like htop but for fingerprints/logs) that you can run on your Ubuntu homelab. It shows live, updating panels:
+•	Top source IPs (count)
+•	Top User-Agents
+•	Top endpoints (URIs)
+•	Recent suspicious lines (from journal/docker/nginx/auth)
+•	Quick stats (lines scanned, last refresh time)
+Controls: q to quit, r to force-refresh, s to save a snapshot CSV to /root/homelab-fingerprints/.
+No external Python packages required — only Python 3 (stdlib). Save the script, make it executable, run with sudo for full log access.
 
-What it captures:
-•	timestamp (when request/event logged)
-•	service (nginx, casaos, cloudflared, docker:<container>, sshd, journal)
-•	src_ip (client IP from log or connection)
-•	client_ip_header (CF-Connecting-IP / X-Forwarded-For if present)
-•	method (HTTP method when available)
-•	uri (path)
-•	status (HTTP status)
-•	user_agent (if present)
-•	extra (raw matched line)
-•	(optional) ja3 hash if tshark + ja3 plugin available and pcap files exist
+1. Script — save as /root/logwatch_tui.py || or save as "sudo logwatch_tui.py"
+2. Make it executable & run : sudo chmod +x /root/logwatch_tui.py || or sudo chmod +x logwatch_tui.py
 
-How to use
-1.	Save the script as /root/collect-fingerprints.sh
-2.	Make executable: sudo chmod +x /root/collect-fingerprints.sh
-3.	Run it: sudo /root/collect-fingerprints.sh
-4.	Results will be under /root/homelab-fingerprints/ and the CSV path will be printed at the end.
+you can run the code using this command "sudo logwatch_tui.py"
