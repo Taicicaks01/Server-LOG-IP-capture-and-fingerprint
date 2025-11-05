@@ -1,203 +1,751 @@
 #!/usr/bin/env python3
-# logwatch_tui.py  -- live TUI for fingerprints/logs
-# Run as root for best access: sudo python3 /root/logwatch_tui.py
+"""
+Jejak_Kuluk - Advanced Linux Defensive Cybersecurity Tool
+A powerful CLI tool for monitoring, analyzing, and fingerprinting server activities
+Created by: Wayan_Choir
+Developed by: Hornet Selem Team
+"""
 
-import curses, time, subprocess, shlex, os, csv
-from collections import Counter, deque, defaultdict
-from datetime import datetime
-
-# Config
-SCAN_LINES = 2000            # how many lines to scan from each source per refresh
-REFRESH_SEC = 3              # default refresh interval
-OUTDIR = "/root/homelab-fingerprints"
-os.makedirs(OUTDIR, exist_ok=True)
-
-# Sources to scan (adjust as needed)
-NGINX_LOGS = ["/var/log/nginx/access.log", "/var/log/nginx/access.log.1"]
-AUTH_LOG = "/var/log/auth.log"
-JOURNAL_SINCE = "1m"  # last 1 minute of journalctl (fallback)
-DOCKER_CONTAINERS = True  # try to query docker logs if docker exists
-DOCKER_LINES = 500
-
-# Basic helpers
-def sh(cmd):
-    try:
-        out = subprocess.check_output(shlex.split(cmd), stderr=subprocess.DEVNULL, timeout=6)
-        return out.decode('utf-8', errors='ignore')
-    except Exception:
-        return ""
-
-def tail_file(path, n):
-    if not os.path.exists(path):
-        return []
-    try:
-        out = sh(f"tail -n {n} {path}")
-        return out.splitlines()
-    except Exception:
-        return []
-
-def journal_recent(since="1m"):
-    return sh(f"journalctl --since \"{since}\" -o short-iso -n {SCAN_LINES}")
-
-def docker_recent_lines():
-    lines = []
-    if not shutil_which("docker"):
-        return lines
-    # list containers
-    out = sh("docker ps --format '{{.Names}}'")
-    for cname in out.splitlines():
-        if not cname.strip():
-            continue
-        # read recent logs
-        l = sh(f"docker logs --since 1m --timestamps {cname} 2>/dev/null")
-        if l:
-            for L in l.splitlines():
-                lines.append(f"docker[{cname}]: {L}")
-    return lines
-
-def shutil_which(name):
-    return subprocess.call(["which", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-
-# parsers (simple, heuristic)
+import argparse
 import re
-IP_RE = re.compile(r'(?:(?:\d{1,3}\.){3}\d{1,3})')
-UA_RE = re.compile(r'User-Agent[:=] ?(.+)$', re.I)
-REQ_RE = re.compile(r'\"(GET|POST|PUT|DELETE|PATCH) ([^ ]+)')
+import os
+import json
+import sqlite3
+import threading
+import time
+from datetime import datetime, timedelta
+from collections import defaultdict
+from pathlib import Path
 
-def parse_lines(lines, counters):
-    recent = deque(maxlen=200)
-    for line in lines:
-        if not line:
-            continue
-        # timestamp optionally
-        ts = ""
-        m = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', line)
-        if m:
-            ts = m.group(0)
-        ip = ""
-        ipm = IP_RE.search(line)
-        if ipm:
-            ip = ipm.group(0)
-            counters['ips'][ip] += 1
-        ua = ""
-        uam = UA_RE.search(line)
-        if uam:
-            ua = uam.group(1).strip()
-            counters['uas'][ua] += 1
-        reqm = REQ_RE.search(line)
-        if reqm:
-            path = reqm.group(2)
-            counters['uris'][path] += 1
-        # store recent suspicious-looking lines (auth failures, password, failed, POST login, CF-Connecting-IP)
-        if re.search(r'(?i)fail|failed|unauthori|password|CF-Connecting-IP|X-Forwarded-For|POST .*login|POST .*auth', line):
-            recent.appendleft((ts or datetime.utcnow().isoformat(), ip, line.strip()))
-    return recent
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.live import Live
+    from rich.layout import Layout
+    from rich.text import Text
+    from rich import box
+except ImportError:
+    print("Error: 'rich' library required. Install: pip3 install rich")
+    exit(1)
 
-def gather_all():
-    counters = {'ips': Counter(), 'uas': Counter(), 'uris': Counter()}
-    recent_lines = deque(maxlen=400)
-    # 1) nginx logs
-    for f in NGINX_LOGS:
-        for ln in tail_file(f, SCAN_LINES):
-            r = parse_lines([ln], counters)
-            recent_lines.extendleft(r)
-    # 2) auth log
-    for ln in tail_file(AUTH_LOG, SCAN_LINES):
-        r = parse_lines([ln], counters)
-        recent_lines.extendleft(r)
-    # 3) journal
-    j = journal_recent(JOURNAL_SINCE)
-    for ln in j.splitlines():
-        r = parse_lines([ln], counters)
-        recent_lines.extendleft(r)
-    # 4) docker (best-effort, short)
-    if shutil_which("docker"):
-        out = sh(f"docker ps --format '{{{{.Names}}}}'")
-        for cname in out.splitlines():
-            if not cname: continue
-            lns = sh(f"docker logs --since 1m --timestamps {cname} 2>/dev/null").splitlines()
-            for ln in lns[-200:]:
-                r = parse_lines([f"docker[{cname}]: {ln}"], counters)
-                recent_lines.extendleft(r)
-    return counters, list(recent_lines)[:200]
+try:
+    import geoip2.database
+    GEOIP_AVAILABLE = True
+except ImportError:
+    GEOIP_AVAILABLE = False
 
-# TUI
-def draw(scr):
-    curses.use_default_colors()
-    scr.nodelay(True)
-    last = 0
-    snapshot_count = 0
-    global REFRESH_SEC
-    while True:
-        now = time.time()
-        if now - last >= REFRESH_SEC:
-            counters, recent = gather_all()
-            last = now
-        scr.erase()
-        h, w = scr.getmaxyx()
-        # Header
-        scr.addstr(0,0, "logwatch — live fingerprint dashboard    (r refresh | s save snapshot | q quit)")
-        scr.addstr(1,0, f"refresh every {REFRESH_SEC}s | scanned top lines: {SCAN_LINES} | last: {datetime.utcnow().isoformat()}")
+try:
+    from scapy.all import sniff, IP, TCP
+    SCAPY_AVAILABLE = True
+except ImportError:
+    SCAPY_AVAILABLE = False
 
-        # Left column: top IPs
-        scr.addstr(3,0, "Top Source IPs")
-        ips = counters['ips'].most_common(12)
-        for i,(ip,c) in enumerate(ips):
-            scr.addstr(4+i, 0, f"{i+1:2d}. {ip:16s} {c:6d}")
+console = Console()
 
-        # Middle column: top UAs
-        midx = 40
-        scr.addstr(3,midx, "Top User-Agents")
-        uas = counters['uas'].most_common(8)
-        for i,(ua,c) in enumerate(uas):
-            ua_short = (ua[:w-midx-20] + '...') if len(ua) > (w-midx-20) else ua
-            scr.addstr(4+i, midx, f"{i+1:2d}. {ua_short: <{w-midx-20}} {c:4d}")
+# ASCII Banner
+BANNER = """
+[cyan]     ____.       __             __        .__       __        
+    |    | ____ |__| ____ |  | __ | | ____ __| |  __ __| |  __ 
+    |    |/ __ \\|  |/ __ \\| |/ / | |/ / |  \\ | | |  \\ |/ /  
+    |    |  ___/ |  (  <_> )   <  |  <|  Y Y  \\|  <_> >  <   
+    |____|\\___  >__|\\____/|__|_ \\____/|__|_|  /____/|__|_ \\ 
+             \\/              \\/          \\/        \\/[/cyan]        
+[bold yellow]Created by: Wayan_Choir[/bold yellow]  
+[bold green]Developed by: Hornet Selem Team[/bold green]  
+[dim]Open Source Project — Contribute now![/dim]
+"""
 
-        # Right column: top URIs
-        rcol = 110 if w>130 else (midx+40)
-        scr.addstr(3,rcol, "Top Endpoints")
-        uris = counters['uris'].most_common(8)
-        for i,(u,c) in enumerate(uris):
-            u_short = (u[:w-rcol-20] + '...') if len(u) > (w-rcol-20) else u
-            scr.addstr(4+i, rcol, f"{i+1:2d}. {u_short: <{w-rcol-20}} {c:4d}")
+# Database path
+DB_PATH = os.path.expanduser("~/.jejak_kuluk.db")
 
-        # Recent suspicious lines (bottom)
-        bottom_start = 14
-        scr.addstr(bottom_start-1,0, "Recent suspicious lines (most recent first):")
-        for idx, (ts, ip, line) in enumerate(recent[:min(10, len(recent))]):
-            ln = f"{ts} {ip:15s} {line}"
-            ln = (ln[:w-1]) if len(ln) >= w else ln
-            scr.addstr(bottom_start+idx, 0, ln)
+# Log file paths
+LOG_PATHS = {
+    'auth': '/var/log/auth.log',
+    'syslog': '/var/log/syslog',
+    'nginx_access': '/var/log/nginx/access.log',
+    'nginx_error': '/var/log/nginx/error.log',
+    'apache_access': '/var/log/apache2/access.log',
+    'apache_error': '/var/log/apache2/error.log',
+}
 
-        # Input handling
+
+class Database:
+    """SQLite database handler for storing events"""
+    
+    def __init__(self, db_path=DB_PATH):
+        self.db_path = db_path
+        self.init_db()
+    
+    def init_db(self):
+        """Initialize database tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                ip_address TEXT,
+                port INTEGER,
+                username TEXT,
+                event_type TEXT,
+                source_file TEXT,
+                user_agent TEXT,
+                country TEXT,
+                city TEXT,
+                asn TEXT,
+                risk_score INTEGER,
+                raw_log TEXT
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ip_stats (
+                ip_address TEXT PRIMARY KEY,
+                first_seen TEXT,
+                last_seen TEXT,
+                total_attempts INTEGER,
+                failed_attempts INTEGER,
+                countries TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def insert_event(self, event_data):
+        """Insert event into database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO events (timestamp, ip_address, port, username, event_type, 
+                              source_file, user_agent, country, city, asn, risk_score, raw_log)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            event_data.get('timestamp'),
+            event_data.get('ip_address'),
+            event_data.get('port'),
+            event_data.get('username'),
+            event_data.get('event_type'),
+            event_data.get('source_file'),
+            event_data.get('user_agent'),
+            event_data.get('country'),
+            event_data.get('city'),
+            event_data.get('asn'),
+            event_data.get('risk_score', 0),
+            event_data.get('raw_log')
+        ))
+        
+        # Update IP statistics
+        ip = event_data.get('ip_address')
+        if ip:
+            cursor.execute('SELECT * FROM ip_stats WHERE ip_address = ?', (ip,))
+            result = cursor.fetchone()
+            
+            if result:
+                cursor.execute('''
+                    UPDATE ip_stats 
+                    SET last_seen = ?, total_attempts = total_attempts + 1,
+                        failed_attempts = failed_attempts + ?
+                    WHERE ip_address = ?
+                ''', (event_data.get('timestamp'), 
+                     1 if 'failed' in event_data.get('event_type', '').lower() else 0, 
+                     ip))
+            else:
+                cursor.execute('''
+                    INSERT INTO ip_stats (ip_address, first_seen, last_seen, 
+                                        total_attempts, failed_attempts, countries)
+                    VALUES (?, ?, ?, 1, ?, ?)
+                ''', (ip, event_data.get('timestamp'), event_data.get('timestamp'),
+                     1 if 'failed' in event_data.get('event_type', '').lower() else 0,
+                     event_data.get('country', 'Unknown')))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_events(self, limit=100, ip_filter=None, hours=24):
+        """Retrieve events from database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        query = 'SELECT * FROM events WHERE timestamp > ?'
+        params = [datetime.now().isoformat()[:19].replace('T', ' ')]
+        
+        if ip_filter:
+            query += ' AND ip_address = ?'
+            params.append(ip_filter)
+        
+        query += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        conn.close()
+        
+        return results
+    
+    def get_ip_stats(self):
+        """Get IP statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM ip_stats ORDER BY total_attempts DESC')
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+
+class GeoIPLookup:
+    """GeoIP lookup handler"""
+    
+    def __init__(self):
+        self.reader = None
+        if GEOIP_AVAILABLE:
+            # Try to find GeoLite2 database
+            possible_paths = [
+                '/usr/share/GeoIP/GeoLite2-City.mmdb',
+                '/var/lib/GeoIP/GeoLite2-City.mmdb',
+                './GeoLite2-City.mmdb'
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    try:
+                        self.reader = geoip2.database.Reader(path)
+                        break
+                    except:
+                        pass
+    
+    def lookup(self, ip_address):
+        """Lookup IP address geolocation"""
+        result = {
+            'country': 'Unknown',
+            'city': 'Unknown',
+            'asn': 'Unknown'
+        }
+        
+        if self.reader:
+            try:
+                response = self.reader.city(ip_address)
+                result['country'] = response.country.name or 'Unknown'
+                result['city'] = response.city.name or 'Unknown'
+            except:
+                pass
+        
+        return result
+
+
+class LogAnalyzer:
+    """Log file analyzer and parser"""
+    
+    def __init__(self, db: Database, geoip: GeoIPLookup):
+        self.db = db
+        self.geoip = geoip
+        self.patterns = {
+            'ssh_failed': re.compile(r'Failed password for (?:invalid user )?(\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)'),
+            'ssh_accepted': re.compile(r'Accepted password for (\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)'),
+            'ssh_disconnect': re.compile(r'Disconnected from (?:invalid user )?(\S+)? ?(\d+\.\d+\.\d+\.\d+) port (\d+)'),
+            'nginx_access': re.compile(r'(\d+\.\d+\.\d+\.\d+) - - \[(.*?)\] "(.*?)" (\d+) (\d+) "(.*?)" "(.*?)"'),
+            'invalid_user': re.compile(r'Invalid user (\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)'),
+        }
+    
+    def parse_log_line(self, line, source_file):
+        """Parse a single log line and extract event data"""
+        events = []
+        
+        # SSH Failed login
+        match = self.patterns['ssh_failed'].search(line)
+        if match:
+            username, ip, port = match.groups()
+            geo = self.geoip.lookup(ip)
+            events.append({
+                'timestamp': datetime.now().isoformat(),
+                'ip_address': ip,
+                'port': int(port),
+                'username': username,
+                'event_type': 'SSH_FAILED_LOGIN',
+                'source_file': source_file,
+                'country': geo['country'],
+                'city': geo['city'],
+                'asn': geo['asn'],
+                'risk_score': 70,
+                'raw_log': line.strip()
+            })
+        
+        # SSH Accepted login
+        match = self.patterns['ssh_accepted'].search(line)
+        if match:
+            username, ip, port = match.groups()
+            geo = self.geoip.lookup(ip)
+            events.append({
+                'timestamp': datetime.now().isoformat(),
+                'ip_address': ip,
+                'port': int(port),
+                'username': username,
+                'event_type': 'SSH_ACCEPTED_LOGIN',
+                'source_file': source_file,
+                'country': geo['country'],
+                'city': geo['city'],
+                'asn': geo['asn'],
+                'risk_score': 20,
+                'raw_log': line.strip()
+            })
+        
+        # Invalid user
+        match = self.patterns['invalid_user'].search(line)
+        if match:
+            username, ip, port = match.groups()
+            geo = self.geoip.lookup(ip)
+            events.append({
+                'timestamp': datetime.now().isoformat(),
+                'ip_address': ip,
+                'port': int(port),
+                'username': username,
+                'event_type': 'INVALID_USER',
+                'source_file': source_file,
+                'country': geo['country'],
+                'city': geo['city'],
+                'asn': geo['asn'],
+                'risk_score': 80,
+                'raw_log': line.strip()
+            })
+        
+        # Nginx access
+        match = self.patterns['nginx_access'].search(line)
+        if match:
+            ip, timestamp, request, status, size, referrer, user_agent = match.groups()
+            geo = self.geoip.lookup(ip)
+            risk = 30
+            if int(status) == 404:
+                risk = 50
+            elif int(status) >= 500:
+                risk = 60
+            
+            events.append({
+                'timestamp': datetime.now().isoformat(),
+                'ip_address': ip,
+                'port': 80,
+                'username': '-',
+                'event_type': f'HTTP_{status}',
+                'source_file': source_file,
+                'user_agent': user_agent,
+                'country': geo['country'],
+                'city': geo['city'],
+                'asn': geo['asn'],
+                'risk_score': risk,
+                'raw_log': line.strip()
+            })
+        
+        return events
+    
+    def analyze_file(self, filepath, lines=100):
+        """Analyze log file"""
+        events = []
+        
+        if not os.path.exists(filepath):
+            console.print(f"[yellow]⚠️  File not found: {filepath}[/yellow]")
+            return events
+        
         try:
-            ch = scr.getch()
-            if ch == ord('q'):
-                return
-            elif ch == ord('r'):
-                last = 0  # force refresh
-            elif ch == ord('s'):
-                # save snapshot CSV
-                snapshot_count += 1
-                fname = os.path.join(OUTDIR, f"snapshot_{datetime.utcnow().strftime('%F_%H%M%S')}.csv")
-                with open(fname, "w", newline='', encoding='utf-8') as fh:
-                    writer = csv.writer(fh)
-                    writer.writerow(["rank","type","value","count"])
-                    for i,(v,c) in enumerate(counters['ips'].most_common(100),1):
-                        writer.writerow([i,"ip",v,c])
-                    for i,(v,c) in enumerate(counters['uas'].most_common(100),1):
-                        writer.writerow([i,"ua",v,c])
-                    for i,(v,c) in enumerate(counters['uris'].most_common(100),1):
-                        writer.writerow([i,"uri",v,c])
-                scr.addstr(h-2,0, f"Saved snapshot: {fname}")
-        except curses.error:
-            pass
+            with open(filepath, 'r', errors='ignore') as f:
+                log_lines = f.readlines()[-lines:]
+                
+            for line in log_lines:
+                parsed_events = self.parse_log_line(line, filepath)
+                for event in parsed_events:
+                    events.append(event)
+                    self.db.insert_event(event)
+        
+        except PermissionError:
+            console.print(f"[red]❌ Permission denied: {filepath}[/red]")
+            console.print("[yellow]💡 Try running with sudo[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error reading {filepath}: {e}[/red]")
+        
+        return events
+    
+    def detect_anomalies(self, events):
+        """Detect anomalies in events"""
+        anomalies = []
+        ip_attempts = defaultdict(int)
+        
+        for event in events:
+            ip = event.get('ip_address')
+            if 'FAILED' in event.get('event_type', '') or 'INVALID' in event.get('event_type', ''):
+                ip_attempts[ip] += 1
+        
+        # Brute force detection (5+ failed attempts)
+        for ip, count in ip_attempts.items():
+            if count >= 5:
+                anomalies.append({
+                    'type': 'BRUTE_FORCE',
+                    'ip': ip,
+                    'attempts': count,
+                    'severity': 'HIGH'
+                })
+        
+        return anomalies
 
-        scr.refresh()
-        time.sleep(0.1)
+
+class NetworkMonitor:
+    """Network packet monitor using Scapy"""
+    
+    def __init__(self, db: Database, geoip: GeoIPLookup):
+        self.db = db
+        self.geoip = geoip
+        self.running = False
+    
+    def packet_handler(self, packet):
+        """Handle captured packets"""
+        if packet.haslayer(IP) and packet.haslayer(TCP):
+            src_ip = packet[IP].src
+            dst_port = packet[TCP].dport
+            
+            # Detect port scanning (SYN packets)
+            if packet[TCP].flags == 'S':
+                geo = self.geoip.lookup(src_ip)
+                event = {
+                    'timestamp': datetime.now().isoformat(),
+                    'ip_address': src_ip,
+                    'port': dst_port,
+                    'username': '-',
+                    'event_type': 'PORT_SCAN',
+                    'source_file': 'network',
+                    'country': geo['country'],
+                    'city': geo['city'],
+                    'asn': geo['asn'],
+                    'risk_score': 85,
+                    'raw_log': f'SYN packet from {src_ip} to port {dst_port}'
+                }
+                self.db.insert_event(event)
+    
+    def start_monitoring(self, interface='eth0'):
+        """Start network monitoring"""
+        if not SCAPY_AVAILABLE:
+            console.print("[yellow]⚠️  Scapy not available. Network monitoring disabled.[/yellow]")
+            return
+        
+        self.running = True
+        try:
+            sniff(iface=interface, prn=self.packet_handler, store=0, 
+                  filter="tcp", stop_filter=lambda x: not self.running)
+        except Exception as e:
+            console.print(f"[red]Network monitoring error: {e}[/red]")
+    
+    def stop_monitoring(self):
+        """Stop network monitoring"""
+        self.running = False
+
+
+def get_risk_badge(score):
+    """Get risk badge based on score"""
+    if score < 30:
+        return "[green]🟩 SAFE[/green]"
+    elif score < 70:
+        return "[yellow]🟨 SUSPICIOUS[/yellow]"
+    else:
+        return "[red]🟥 ATTACK[/red]"
+
+
+def cmd_analyze(args):
+    """Analyze log files"""
+    console.print(Panel(BANNER, border_style="cyan"))
+    console.print("[bold cyan]🔍 Starting Log Analysis...[/bold cyan]\n")
+    
+    db = Database()
+    geoip = GeoIPLookup()
+    analyzer = LogAnalyzer(db, geoip)
+    
+    all_events = []
+    
+    # Analyze each log file
+    for log_name, log_path in LOG_PATHS.items():
+        if os.path.exists(log_path):
+            console.print(f"[cyan]📄 Analyzing {log_name}: {log_path}[/cyan]")
+            events = analyzer.analyze_file(log_path, lines=args.lines)
+            all_events.extend(events)
+    
+    # Detect anomalies
+    console.print(f"\n[bold yellow]🧠 Analyzing {len(all_events)} events...[/bold yellow]")
+    anomalies = analyzer.detect_anomalies(all_events)
+    
+    # Display results
+    if anomalies:
+        console.print(f"\n[bold red]⚠️  {len(anomalies)} ANOMALIES DETECTED![/bold red]\n")
+        
+        table = Table(title="Detected Anomalies", box=box.ROUNDED)
+        table.add_column("Type", style="red")
+        table.add_column("IP Address", style="yellow")
+        table.add_column("Attempts", style="cyan")
+        table.add_column("Severity", style="magenta")
+        
+        for anomaly in anomalies:
+            table.add_row(
+                anomaly['type'],
+                anomaly['ip'],
+                str(anomaly['attempts']),
+                anomaly['severity']
+            )
+        
+        console.print(table)
+    else:
+        console.print("\n[green]✅ No anomalies detected[/green]")
+    
+    # Display recent events
+    if all_events:
+        console.print(f"\n[bold cyan]📋 Recent Events (last {min(20, len(all_events))}):[/bold cyan]\n")
+        
+        table = Table(box=box.ROUNDED)
+        table.add_column("Time", style="dim")
+        table.add_column("IP", style="cyan")
+        table.add_column("Event", style="yellow")
+        table.add_column("User", style="green")
+        table.add_column("Location", style="magenta")
+        table.add_column("Risk", style="bold")
+        
+        for event in all_events[-20:]:
+            table.add_row(
+                event['timestamp'].split('T')[1][:8] if 'T' in event['timestamp'] else event['timestamp'][:8],
+                event['ip_address'],
+                event['event_type'],
+                event['username'],
+                f"{event['city']}, {event['country']}",
+                get_risk_badge(event['risk_score'])
+            )
+        
+        console.print(table)
+
+
+def cmd_live(args):
+    """Live monitoring mode"""
+    console.print(Panel(BANNER, border_style="cyan"))
+    console.print("[bold cyan]🚨 Starting Live Monitor...[/bold cyan]")
+    console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+    
+    db = Database()
+    geoip = GeoIPLookup()
+    analyzer = LogAnalyzer(db, geoip)
+    
+    seen_ips = set()
+    
+    try:
+        while True:
+            # Monitor auth log
+            if os.path.exists(LOG_PATHS['auth']):
+                events = analyzer.analyze_file(LOG_PATHS['auth'], lines=10)
+                
+                for event in events:
+                    ip = event['ip_address']
+                    
+                    # Highlight new IPs
+                    if ip not in seen_ips:
+                        seen_ips.add(ip)
+                        console.print(f"[bold red]🆕 NEW IP DETECTED: {ip}[/bold red]")
+                    
+                    # Display event
+                    risk_badge = get_risk_badge(event['risk_score'])
+                    console.print(
+                        f"[dim]{event['timestamp'].split('T')[1][:8]}[/dim] "
+                        f"[cyan]{ip}[/cyan] "
+                        f"[yellow]{event['event_type']}[/yellow] "
+                        f"[green]{event['username']}[/green] "
+                        f"{risk_badge}"
+                    )
+            
+            time.sleep(args.interval)
+    
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹️  Monitoring stopped[/yellow]")
+
+
+def cmd_dashboard(args):
+    """Interactive dashboard mode"""
+    console.print(Panel(BANNER, border_style="cyan"))
+    
+    db = Database()
+    
+    def generate_dashboard():
+        """Generate dashboard layout"""
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body"),
+            Layout(name="footer", size=3)
+        )
+        
+        # Header
+        layout["header"].update(
+            Panel("[bold cyan]Jejak_Kuluk Dashboard[/bold cyan] - [dim]Real-time System Monitor[/dim]",
+                  border_style="cyan")
+        )
+        
+        # Body - IP Statistics
+        ip_stats = db.get_ip_stats()
+        
+        table = Table(title="Top Suspicious IPs", box=box.ROUNDED)
+        table.add_column("IP Address", style="cyan")
+        table.add_column("Total", style="yellow")
+        table.add_column("Failed", style="red")
+        table.add_column("First Seen", style="dim")
+        table.add_column("Last Seen", style="dim")
+        table.add_column("Country", style="green")
+        
+        for stat in ip_stats[:15]:
+            table.add_row(
+                stat[0],  # IP
+                str(stat[3]),  # Total attempts
+                str(stat[4]),  # Failed attempts
+                stat[1].split()[0] if stat[1] else 'N/A',  # First seen
+                stat[2].split()[0] if stat[2] else 'N/A',  # Last seen
+                stat[5] if stat[5] else 'Unknown'  # Country
+            )
+        
+        layout["body"].update(table)
+        
+        # Footer
+        layout["footer"].update(
+            Panel("[dim]Press Ctrl+C to exit | Refreshing every 5 seconds[/dim]",
+                  border_style="cyan")
+        )
+        
+        return layout
+    
+    try:
+        with Live(generate_dashboard(), refresh_per_second=0.2, console=console) as live:
+            while True:
+                time.sleep(5)
+                live.update(generate_dashboard())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard closed[/yellow]")
+
+
+def cmd_export(args):
+    """Export report"""
+    console.print(Panel(BANNER, border_style="cyan"))
+    console.print("[bold cyan]📊 Generating Report...[/bold cyan]\n")
+    
+    db = Database()
+    events = db.get_events(limit=1000, hours=24)
+    
+    report_data = {
+        'generated_at': datetime.now().isoformat(),
+        'total_events': len(events),
+        'events': []
+    }
+    
+    for event in events:
+        report_data['events'].append({
+            'timestamp': event[1],
+            'ip': event[2],
+            'port': event[3],
+            'username': event[4],
+            'type': event[5],
+            'country': event[8],
+            'city': event[9],
+            'risk_score': event[11]
+        })
+    
+    # Save to file
+    filename = f"jejak_kuluk_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    
+    with open(filename, 'w') as f:
+        json.dump(report_data, f, indent=2)
+    
+    console.print(f"[green]✅ Report saved to: {filename}[/green]")
+    console.print(f"[cyan]📈 Total events: {len(events)}[/cyan]")
+
+
+def cmd_trace(args):
+    """Trace IP address"""
+    console.print(Panel(BANNER, border_style="cyan"))
+    console.print(f"[bold cyan]👁️  Tracing IP: {args.ip}[/bold cyan]\n")
+    
+    db = Database()
+    geoip = GeoIPLookup()
+    
+    # Get GeoIP info
+    geo = geoip.lookup(args.ip)
+    console.print(f"[cyan]🌍 Location: {geo['city']}, {geo['country']}[/cyan]")
+    console.print(f"[cyan]🏢 ASN: {geo['asn']}[/cyan]\n")
+    
+    # Get events from database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM events WHERE ip_address = ? ORDER BY timestamp DESC', (args.ip,))
+    events = cursor.fetchall()
+    conn.close()
+    
+    if events:
+        console.print(f"[yellow]📜 Found {len(events)} events:[/yellow]\n")
+        
+        table = Table(box=box.ROUNDED)
+        table.add_column("Timestamp", style="dim")
+        table.add_column("Event Type", style="yellow")
+        table.add_column("Username", style="green")
+        table.add_column("Port", style="cyan")
+        table.add_column("Risk", style="bold")
+        
+        for event in events[:30]:
+            table.add_row(
+                event[1],
+                event[5],
+                event[4],
+                str(event[3]),
+                get_risk_badge(event[11])
+            )
+        
+        console.print(table)
+    else:
+        console.print("[yellow]No events found for this IP[/yellow]")
+
 
 def main():
-    curses.wrapper(draw)
+    parser = argparse.ArgumentParser(
+        description='Jejak_Kuluk - Advanced Linux Defensive Cybersecurity Tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # Analyze command
+    parser_analyze = subparsers.add_parser('analyze', help='Analyze log files')
+    parser_analyze.add_argument('-l', '--lines', type=int, default=500,
+                               help='Number of lines to analyze per file')
+    
+    # Live command
+    parser_live = subparsers.add_parser('live', help='Live monitoring mode')
+    parser_live.add_argument('-i', '--interval', type=int, default=5,
+                            help='Refresh interval in seconds')
+    
+    # Dashboard command
+    parser_dashboard = subparsers.add_parser('dashboard', help='Interactive dashboard')
+    
+    # Export command
+    parser_export = subparsers.add_parser('export', help='Export report')
+    
+    # Trace command
+    parser_trace = subparsers.add_parser('trace', help='Trace IP address')
+    parser_trace.add_argument('ip', help='IP address to trace')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        console.print(Panel(BANNER, border_style="cyan"))
+        parser.print_help()
+        return
+    
+    # Execute command
+    if args.command == 'analyze':
+        cmd_analyze(args)
+    elif args.command == 'live':
+        cmd_live(args)
+    elif args.command == 'dashboard':
+        cmd_dashboard(args)
+    elif args.command == 'export':
+        cmd_export(args)
+    elif args.command == 'trace':
+        cmd_trace(args)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
