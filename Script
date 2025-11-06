@@ -1,34 +1,44 @@
 #!/usr/bin/env python3
 """
-Jejak_Kuluk - Advanced Linux Defensive Cybersecurity Tool
-A powerful CLI tool for monitoring, analyzing, and fingerprinting server activities
-Created by: Wayan_Choir
-Developed by: Hornet Selem Team
+Jejak_Kuluk - Advanced Defensive Cybersecurity Monitoring Tool
+A comprehensive Linux security monitoring system for intrusion detection,
+log analysis, and process anomaly detection.
+
+Author: Wayan_Choir
+Team: Hornet Selem Team
+License: MIT
 """
 
 import argparse
-import re
-import os
+import datetime
 import json
+import os
+import re
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
-from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, Counter
 from pathlib import Path
+from typing import Dict, List, Tuple, Optional
 
 try:
+    import psutil
     from rich.console import Console
     from rich.table import Table
-    from rich.panel import Panel
     from rich.live import Live
     from rich.layout import Layout
+    from rich.panel import Panel
+    from rich.progress import Progress, SpinnerColumn, TextColumn
     from rich.text import Text
     from rich import box
 except ImportError:
-    print("Error: 'rich' library required. Install: pip3 install rich")
-    exit(1)
+    print("Error: Required libraries not found.")
+    print("Install with: pip3 install rich psutil")
+    sys.exit(1)
 
+# Optional imports
 try:
     import geoip2.database
     GEOIP_AVAILABLE = True
@@ -41,711 +51,969 @@ try:
 except ImportError:
     SCAPY_AVAILABLE = False
 
-console = Console()
+# Constants
+VERSION = "1.0.0"
+DB_PATH = os.path.expanduser("~/.jejak_kuluk.db")
+GEOIP_DB_PATH = "/usr/share/GeoIP/GeoLite2-City.mmdb"
 
 # ASCII Banner
 BANNER = """
-[cyan]     ____.       __             __        .__       __        
-    |    | ____ |__| ____ |  | __ | | ____ __| |  __ __| |  __ 
-    |    |/ __ \\|  |/ __ \\| |/ / | |/ / |  \\ | | |  \\ |/ /  
-    |    |  ___/ |  (  <_> )   <  |  <|  Y Y  \\|  <_> >  <   
-    |____|\\___  >__|\\____/|__|_ \\____/|__|_|  /____/|__|_ \\ 
-             \\/              \\/          \\/        \\/[/cyan]        
-[bold yellow]Created by: Wayan_Choir[/bold yellow]  
-[bold green]Developed by: Hornet Selem Team[/bold green]  
-[dim]Open Source Project — Contribute now![/dim]
-"""
+[bold cyan]
+   ____.       __          __           ____  __.      .__          __    
+  |    | ____ |__|____    |  | __      |    |/ _|__ __|  |  __ __ |  | __
+  |    |/ __ \|  \__  \   |  |/ /      |      < |  |  \  | |  |  \|  |/ /
+/\__|    \  ___/| |/ __ \_ |    <       |    |  \|  |  /  |_|  |  /    < 
+\________|\___  >__(____  / |__|_ \     |____|__ \____/|____/____/|__|_ \\
+              \/        \/       \/             \/                      \/
+[/bold cyan]
+[bold yellow]Created by:[/bold yellow] [cyan]Wayan_Choir[/cyan]
+[bold yellow]Developed by:[/bold yellow] [cyan]Hornet Selem Team[/cyan]
+[bold green]Open Source Project — Contribute now![/bold green]
+[dim]Version {version}[/dim]
+""".format(version=VERSION)
 
-# Database path
-DB_PATH = os.path.expanduser("~/.jejak_kuluk.db")
-
-# Log file paths
-LOG_PATHS = {
-    'auth': '/var/log/auth.log',
-    'syslog': '/var/log/syslog',
-    'nginx_access': '/var/log/nginx/access.log',
-    'nginx_error': '/var/log/nginx/error.log',
-    'apache_access': '/var/log/apache2/access.log',
-    'apache_error': '/var/log/apache2/error.log',
-}
+console = Console()
 
 
 class Database:
-    """SQLite database handler for storing events"""
+    """SQLite database manager for storing security events."""
     
-    def __init__(self, db_path=DB_PATH):
+    def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self.init_db()
     
     def init_db(self):
-        """Initialize database tables"""
+        """Initialize database tables."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('''
+        # Events table
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
                 ip_address TEXT,
-                port INTEGER,
                 username TEXT,
-                event_type TEXT,
-                source_file TEXT,
-                user_agent TEXT,
+                port INTEGER,
                 country TEXT,
                 city TEXT,
-                asn TEXT,
                 risk_score INTEGER,
-                raw_log TEXT
+                raw_log TEXT,
+                fingerprint TEXT
             )
-        ''')
+        """)
         
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS ip_stats (
-                ip_address TEXT PRIMARY KEY,
-                first_seen TEXT,
-                last_seen TEXT,
-                total_attempts INTEGER,
-                failed_attempts INTEGER,
-                countries TEXT
+        # Process anomalies table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS process_anomalies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                pid INTEGER,
+                name TEXT,
+                cpu_percent REAL,
+                memory_percent REAL,
+                connections INTEGER,
+                risk_level TEXT
             )
-        ''')
+        """)
         
         conn.commit()
         conn.close()
     
-    def insert_event(self, event_data):
-        """Insert event into database"""
+    def insert_event(self, event_data: Dict):
+        """Insert security event into database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('''
-            INSERT INTO events (timestamp, ip_address, port, username, event_type, 
-                              source_file, user_agent, country, city, asn, risk_score, raw_log)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
+        cursor.execute("""
+            INSERT INTO events (timestamp, event_type, ip_address, username, 
+                              port, country, city, risk_score, raw_log, fingerprint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
             event_data.get('timestamp'),
-            event_data.get('ip_address'),
-            event_data.get('port'),
-            event_data.get('username'),
             event_data.get('event_type'),
-            event_data.get('source_file'),
-            event_data.get('user_agent'),
+            event_data.get('ip_address'),
+            event_data.get('username'),
+            event_data.get('port'),
             event_data.get('country'),
             event_data.get('city'),
-            event_data.get('asn'),
-            event_data.get('risk_score', 0),
-            event_data.get('raw_log')
+            event_data.get('risk_score'),
+            event_data.get('raw_log'),
+            event_data.get('fingerprint')
         ))
-        
-        # Update IP statistics
-        ip = event_data.get('ip_address')
-        if ip:
-            cursor.execute('SELECT * FROM ip_stats WHERE ip_address = ?', (ip,))
-            result = cursor.fetchone()
-            
-            if result:
-                cursor.execute('''
-                    UPDATE ip_stats 
-                    SET last_seen = ?, total_attempts = total_attempts + 1,
-                        failed_attempts = failed_attempts + ?
-                    WHERE ip_address = ?
-                ''', (event_data.get('timestamp'), 
-                     1 if 'failed' in event_data.get('event_type', '').lower() else 0, 
-                     ip))
-            else:
-                cursor.execute('''
-                    INSERT INTO ip_stats (ip_address, first_seen, last_seen, 
-                                        total_attempts, failed_attempts, countries)
-                    VALUES (?, ?, ?, 1, ?, ?)
-                ''', (ip, event_data.get('timestamp'), event_data.get('timestamp'),
-                     1 if 'failed' in event_data.get('event_type', '').lower() else 0,
-                     event_data.get('country', 'Unknown')))
         
         conn.commit()
         conn.close()
     
-    def get_events(self, limit=100, ip_filter=None, hours=24):
-        """Retrieve events from database"""
+    def get_events(self, limit: int = 100, event_type: str = None) -> List[Dict]:
+        """Retrieve events from database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        query = 'SELECT * FROM events WHERE timestamp > ?'
-        params = [datetime.now().isoformat()[:19].replace('T', ' ')]
+        if event_type:
+            cursor.execute("""
+                SELECT * FROM events WHERE event_type = ? 
+                ORDER BY timestamp DESC LIMIT ?
+            """, (event_type, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM events ORDER BY timestamp DESC LIMIT ?
+            """, (limit,))
         
-        if ip_filter:
-            query += ' AND ip_address = ?'
-            params.append(ip_filter)
+        columns = [desc[0] for desc in cursor.description]
+        events = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
-        query += ' ORDER BY timestamp DESC LIMIT ?'
-        params.append(limit)
-        
-        cursor.execute(query, params)
-        results = cursor.fetchall()
         conn.close()
-        
-        return results
+        return events
     
-    def get_ip_stats(self):
-        """Get IP statistics"""
+    def insert_process_anomaly(self, process_data: Dict):
+        """Insert process anomaly into database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM ip_stats ORDER BY total_attempts DESC')
-        results = cursor.fetchall()
+        
+        cursor.execute("""
+            INSERT INTO process_anomalies (timestamp, pid, name, cpu_percent, 
+                                          memory_percent, connections, risk_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            process_data.get('timestamp'),
+            process_data.get('pid'),
+            process_data.get('name'),
+            process_data.get('cpu_percent'),
+            process_data.get('memory_percent'),
+            process_data.get('connections'),
+            process_data.get('risk_level')
+        ))
+        
+        conn.commit()
         conn.close()
-        return results
 
 
 class GeoIPLookup:
-    """GeoIP lookup handler"""
+    """GeoIP lookup handler."""
     
     def __init__(self):
+        self.available = GEOIP_AVAILABLE
         self.reader = None
-        if GEOIP_AVAILABLE:
-            # Try to find GeoLite2 database
-            possible_paths = [
-                '/usr/share/GeoIP/GeoLite2-City.mmdb',
-                '/var/lib/GeoIP/GeoLite2-City.mmdb',
-                './GeoLite2-City.mmdb'
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    try:
-                        self.reader = geoip2.database.Reader(path)
-                        break
-                    except:
-                        pass
-    
-    def lookup(self, ip_address):
-        """Lookup IP address geolocation"""
-        result = {
-            'country': 'Unknown',
-            'city': 'Unknown',
-            'asn': 'Unknown'
-        }
         
-        if self.reader:
+        if self.available and os.path.exists(GEOIP_DB_PATH):
             try:
-                response = self.reader.city(ip_address)
-                result['country'] = response.country.name or 'Unknown'
-                result['city'] = response.city.name or 'Unknown'
-            except:
-                pass
+                self.reader = geoip2.database.Reader(GEOIP_DB_PATH)
+            except Exception as e:
+                console.print(f"[yellow]GeoIP database error: {e}[/yellow]")
+                self.available = False
+    
+    def lookup(self, ip: str) -> Tuple[str, str, str]:
+        """Lookup IP address geolocation."""
+        if not self.available or not self.reader:
+            return "Unknown", "Unknown", "Unknown"
         
-        return result
+        try:
+            response = self.reader.city(ip)
+            country = response.country.name or "Unknown"
+            city = response.city.name or "Unknown"
+            asn = response.traits.autonomous_system_organization or "Unknown"
+            return country, city, asn
+        except Exception:
+            return "Unknown", "Unknown", "Unknown"
+    
+    def close(self):
+        """Close GeoIP database."""
+        if self.reader:
+            self.reader.close()
 
 
 class LogAnalyzer:
-    """Log file analyzer and parser"""
+    """Analyze system logs for security events."""
     
-    def __init__(self, db: Database, geoip: GeoIPLookup):
-        self.db = db
+    def __init__(self, geoip: GeoIPLookup):
         self.geoip = geoip
+        self.log_paths = {
+            'auth': '/var/log/auth.log',
+            'syslog': '/var/log/syslog',
+            'nginx_access': '/var/log/nginx/access.log',
+            'nginx_error': '/var/log/nginx/error.log',
+        }
+        
+        # Regex patterns
         self.patterns = {
-            'ssh_failed': re.compile(r'Failed password for (?:invalid user )?(\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)'),
-            'ssh_accepted': re.compile(r'Accepted password for (\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)'),
-            'ssh_disconnect': re.compile(r'Disconnected from (?:invalid user )?(\S+)? ?(\d+\.\d+\.\d+\.\d+) port (\d+)'),
-            'nginx_access': re.compile(r'(\d+\.\d+\.\d+\.\d+) - - \[(.*?)\] "(.*?)" (\d+) (\d+) "(.*?)" "(.*?)"'),
-            'invalid_user': re.compile(r'Invalid user (\S+) from (\d+\.\d+\.\d+\.\d+) port (\d+)'),
+            'ssh_failed': re.compile(r'Failed password for (?:invalid user )?(\S+) from (\S+) port (\d+)'),
+            'ssh_accepted': re.compile(r'Accepted password for (\S+) from (\S+) port (\d+)'),
+            'ssh_disconnect': re.compile(r'Disconnected from (?:invalid user )?(\S+) (\S+) port (\d+)'),
+            'sudo_command': re.compile(r'sudo:\s+(\S+) : TTY=\S+ ; PWD=\S+ ; USER=\S+ ; COMMAND=(.+)'),
+            'nginx_request': re.compile(r'(\S+) - - \[(.*?)\] "(\S+) (\S+) (\S+)" (\d+) (\d+)'),
         }
     
-    def parse_log_line(self, line, source_file):
-        """Parse a single log line and extract event data"""
-        events = []
-        
-        # SSH Failed login
-        match = self.patterns['ssh_failed'].search(line)
-        if match:
-            username, ip, port = match.groups()
-            geo = self.geoip.lookup(ip)
-            events.append({
-                'timestamp': datetime.now().isoformat(),
-                'ip_address': ip,
-                'port': int(port),
-                'username': username,
-                'event_type': 'SSH_FAILED_LOGIN',
-                'source_file': source_file,
-                'country': geo['country'],
-                'city': geo['city'],
-                'asn': geo['asn'],
-                'risk_score': 70,
-                'raw_log': line.strip()
-            })
-        
-        # SSH Accepted login
-        match = self.patterns['ssh_accepted'].search(line)
-        if match:
-            username, ip, port = match.groups()
-            geo = self.geoip.lookup(ip)
-            events.append({
-                'timestamp': datetime.now().isoformat(),
-                'ip_address': ip,
-                'port': int(port),
-                'username': username,
-                'event_type': 'SSH_ACCEPTED_LOGIN',
-                'source_file': source_file,
-                'country': geo['country'],
-                'city': geo['city'],
-                'asn': geo['asn'],
-                'risk_score': 20,
-                'raw_log': line.strip()
-            })
-        
-        # Invalid user
-        match = self.patterns['invalid_user'].search(line)
-        if match:
-            username, ip, port = match.groups()
-            geo = self.geoip.lookup(ip)
-            events.append({
-                'timestamp': datetime.now().isoformat(),
-                'ip_address': ip,
-                'port': int(port),
-                'username': username,
-                'event_type': 'INVALID_USER',
-                'source_file': source_file,
-                'country': geo['country'],
-                'city': geo['city'],
-                'asn': geo['asn'],
-                'risk_score': 80,
-                'raw_log': line.strip()
-            })
-        
-        # Nginx access
-        match = self.patterns['nginx_access'].search(line)
-        if match:
-            ip, timestamp, request, status, size, referrer, user_agent = match.groups()
-            geo = self.geoip.lookup(ip)
-            risk = 30
-            if int(status) == 404:
-                risk = 50
-            elif int(status) >= 500:
-                risk = 60
-            
-            events.append({
-                'timestamp': datetime.now().isoformat(),
-                'ip_address': ip,
-                'port': 80,
-                'username': '-',
-                'event_type': f'HTTP_{status}',
-                'source_file': source_file,
-                'user_agent': user_agent,
-                'country': geo['country'],
-                'city': geo['city'],
-                'asn': geo['asn'],
-                'risk_score': risk,
-                'raw_log': line.strip()
-            })
-        
-        return events
-    
-    def analyze_file(self, filepath, lines=100):
-        """Analyze log file"""
-        events = []
-        
-        if not os.path.exists(filepath):
-            console.print(f"[yellow]⚠️  File not found: {filepath}[/yellow]")
-            return events
+    def read_log(self, log_type: str, lines: int = 1000) -> List[str]:
+        """Read log file."""
+        log_path = self.log_paths.get(log_type)
+        if not log_path or not os.path.exists(log_path):
+            return []
         
         try:
-            with open(filepath, 'r', errors='ignore') as f:
-                log_lines = f.readlines()[-lines:]
-                
-            for line in log_lines:
-                parsed_events = self.parse_log_line(line, filepath)
-                for event in parsed_events:
-                    events.append(event)
-                    self.db.insert_event(event)
-        
+            with open(log_path, 'r', errors='ignore') as f:
+                return f.readlines()[-lines:]
         except PermissionError:
-            console.print(f"[red]❌ Permission denied: {filepath}[/red]")
-            console.print("[yellow]💡 Try running with sudo[/yellow]")
+            console.print(f"[red]Permission denied: {log_path}[/red]")
+            console.print("[yellow]Try running with sudo[/yellow]")
+            return []
         except Exception as e:
-            console.print(f"[red]Error reading {filepath}: {e}[/red]")
+            console.print(f"[red]Error reading {log_path}: {e}[/red]")
+            return []
+    
+    def parse_auth_log(self, lines: List[str]) -> List[Dict]:
+        """Parse authentication logs."""
+        events = []
+        
+        for line in lines:
+            # Failed SSH login
+            match = self.patterns['ssh_failed'].search(line)
+            if match:
+                username, ip, port = match.groups()
+                country, city, asn = self.geoip.lookup(ip)
+                
+                event = {
+                    'timestamp': self._extract_timestamp(line),
+                    'event_type': 'ssh_failed',
+                    'ip_address': ip,
+                    'username': username,
+                    'port': int(port),
+                    'country': country,
+                    'city': city,
+                    'risk_score': self._calculate_risk(ip, 'ssh_failed'),
+                    'raw_log': line.strip(),
+                    'fingerprint': f"{ip}:{port}:{username}"
+                }
+                events.append(event)
+                continue
+            
+            # Successful SSH login
+            match = self.patterns['ssh_accepted'].search(line)
+            if match:
+                username, ip, port = match.groups()
+                country, city, asn = self.geoip.lookup(ip)
+                
+                event = {
+                    'timestamp': self._extract_timestamp(line),
+                    'event_type': 'ssh_accepted',
+                    'ip_address': ip,
+                    'username': username,
+                    'port': int(port),
+                    'country': country,
+                    'city': city,
+                    'risk_score': self._calculate_risk(ip, 'ssh_accepted'),
+                    'raw_log': line.strip(),
+                    'fingerprint': f"{ip}:{port}:{username}"
+                }
+                events.append(event)
+                continue
+            
+            # Sudo command
+            match = self.patterns['sudo_command'].search(line)
+            if match:
+                username, command = match.groups()
+                
+                event = {
+                    'timestamp': self._extract_timestamp(line),
+                    'event_type': 'sudo_command',
+                    'ip_address': None,
+                    'username': username,
+                    'port': None,
+                    'country': 'Local',
+                    'city': 'Local',
+                    'risk_score': self._calculate_risk(None, 'sudo_command', command),
+                    'raw_log': line.strip(),
+                    'fingerprint': f"local:{username}:{command[:50]}"
+                }
+                events.append(event)
         
         return events
     
-    def detect_anomalies(self, events):
-        """Detect anomalies in events"""
-        anomalies = []
-        ip_attempts = defaultdict(int)
+    def parse_nginx_log(self, lines: List[str]) -> List[Dict]:
+        """Parse nginx access logs."""
+        events = []
+        
+        for line in lines:
+            match = self.patterns['nginx_request'].search(line)
+            if match:
+                ip, timestamp, method, path, protocol, status, size = match.groups()
+                country, city, asn = self.geoip.lookup(ip)
+                
+                event = {
+                    'timestamp': timestamp,
+                    'event_type': 'http_request',
+                    'ip_address': ip,
+                    'username': None,
+                    'port': 80,
+                    'country': country,
+                    'city': city,
+                    'risk_score': self._calculate_risk(ip, 'http_request', path, int(status)),
+                    'raw_log': line.strip(),
+                    'fingerprint': f"{ip}:{method}:{path}"
+                }
+                events.append(event)
+        
+        return events
+    
+    def _extract_timestamp(self, log_line: str) -> str:
+        """Extract timestamp from log line."""
+        # Try to extract standard syslog timestamp
+        match = re.match(r'(\w+\s+\d+\s+\d+:\d+:\d+)', log_line)
+        if match:
+            return match.group(1)
+        return datetime.datetime.now().strftime("%b %d %H:%M:%S")
+    
+    def _calculate_risk(self, ip: str, event_type: str, extra: str = None, status: int = None) -> int:
+        """Calculate risk score for event."""
+        score = 0
+        
+        # Base scores
+        if event_type == 'ssh_failed':
+            score = 70
+        elif event_type == 'ssh_accepted':
+            score = 30
+        elif event_type == 'sudo_command':
+            score = 40
+            if extra and any(cmd in extra.lower() for cmd in ['rm -rf', 'chmod', 'wget', 'curl']):
+                score = 80
+        elif event_type == 'http_request':
+            score = 10
+            if extra and any(pattern in extra.lower() for pattern in ['admin', 'wp-admin', '.env', 'config', 'sql']):
+                score = 60
+            if status and status >= 400:
+                score += 20
+        
+        return min(score, 100)
+    
+    def detect_brute_force(self, events: List[Dict], threshold: int = 5, time_window: int = 300) -> List[Dict]:
+        """Detect brute force attacks."""
+        ip_attempts = defaultdict(list)
+        alerts = []
         
         for event in events:
-            ip = event.get('ip_address')
-            if 'FAILED' in event.get('event_type', '') or 'INVALID' in event.get('event_type', ''):
-                ip_attempts[ip] += 1
+            if event['event_type'] == 'ssh_failed' and event['ip_address']:
+                ip_attempts[event['ip_address']].append(event)
         
-        # Brute force detection (5+ failed attempts)
-        for ip, count in ip_attempts.items():
-            if count >= 5:
-                anomalies.append({
-                    'type': 'BRUTE_FORCE',
+        for ip, attempts in ip_attempts.items():
+            if len(attempts) >= threshold:
+                alerts.append({
+                    'type': 'brute_force',
                     'ip': ip,
-                    'attempts': count,
-                    'severity': 'HIGH'
+                    'attempts': len(attempts),
+                    'usernames': list(set(a['username'] for a in attempts)),
+                    'first_seen': attempts[0]['timestamp'],
+                    'last_seen': attempts[-1]['timestamp']
                 })
+        
+        return alerts
+
+
+class ProcessMonitor:
+    """Monitor running processes for anomalies."""
+    
+    def __init__(self):
+        self.baseline_procs = set()
+        self.suspicious_patterns = [
+            'nc', 'netcat', 'ncat', 'socat', 'reverse',
+            'metasploit', 'meterpreter', 'mimikatz',
+            'cryptominer', 'xmrig', 'minerd'
+        ]
+    
+    def get_processes(self) -> List[Dict]:
+        """Get all running processes with details."""
+        processes = []
+        
+        for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent']):
+            try:
+                pinfo = proc.info
+                connections = len(proc.connections()) if proc.connections else 0
+                
+                # Calculate risk
+                risk_level = self._assess_risk(pinfo['name'], pinfo['cpu_percent'], 
+                                               pinfo['memory_percent'], connections)
+                
+                processes.append({
+                    'pid': pinfo['pid'],
+                    'name': pinfo['name'],
+                    'username': pinfo['username'],
+                    'cpu_percent': pinfo['cpu_percent'] or 0.0,
+                    'memory_percent': pinfo['memory_percent'] or 0.0,
+                    'connections': connections,
+                    'risk_level': risk_level
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        
+        return sorted(processes, key=lambda x: x['cpu_percent'], reverse=True)
+    
+    def _assess_risk(self, name: str, cpu: float, memory: float, connections: int) -> str:
+        """Assess process risk level."""
+        # Check for suspicious process names
+        if any(pattern in name.lower() for pattern in self.suspicious_patterns):
+            return 'HIGH'
+        
+        # High resource usage
+        if cpu > 80 or memory > 80:
+            return 'MEDIUM'
+        
+        # Many network connections
+        if connections > 50:
+            return 'MEDIUM'
+        
+        return 'LOW'
+    
+    def detect_anomalies(self, processes: List[Dict]) -> List[Dict]:
+        """Detect anomalous processes."""
+        anomalies = []
+        
+        for proc in processes:
+            if proc['risk_level'] in ['HIGH', 'MEDIUM']:
+                anomalies.append(proc)
         
         return anomalies
 
 
 class NetworkMonitor:
-    """Network packet monitor using Scapy"""
+    """Monitor network traffic using scapy."""
     
-    def __init__(self, db: Database, geoip: GeoIPLookup):
-        self.db = db
-        self.geoip = geoip
-        self.running = False
+    def __init__(self):
+        self.available = SCAPY_AVAILABLE
+        self.port_scan_threshold = 10
+        self.port_scans = defaultdict(set)
     
-    def packet_handler(self, packet):
-        """Handle captured packets"""
-        if packet.haslayer(IP) and packet.haslayer(TCP):
-            src_ip = packet[IP].src
-            dst_port = packet[TCP].dport
-            
-            # Detect port scanning (SYN packets)
-            if packet[TCP].flags == 'S':
-                geo = self.geoip.lookup(src_ip)
-                event = {
-                    'timestamp': datetime.now().isoformat(),
-                    'ip_address': src_ip,
-                    'port': dst_port,
-                    'username': '-',
-                    'event_type': 'PORT_SCAN',
-                    'source_file': 'network',
-                    'country': geo['country'],
-                    'city': geo['city'],
-                    'asn': geo['asn'],
-                    'risk_score': 85,
-                    'raw_log': f'SYN packet from {src_ip} to port {dst_port}'
-                }
-                self.db.insert_event(event)
-    
-    def start_monitoring(self, interface='eth0'):
-        """Start network monitoring"""
-        if not SCAPY_AVAILABLE:
-            console.print("[yellow]⚠️  Scapy not available. Network monitoring disabled.[/yellow]")
+    def packet_callback(self, packet):
+        """Process captured packets."""
+        if not packet.haslayer(IP):
             return
         
-        self.running = True
+        ip_src = packet[IP].src
+        
+        if packet.haslayer(TCP):
+            dst_port = packet[TCP].dport
+            self.port_scans[ip_src].add(dst_port)
+            
+            # Detect port scan
+            if len(self.port_scans[ip_src]) > self.port_scan_threshold:
+                console.print(f"[red]⚠️  Port scan detected from {ip_src}[/red]")
+    
+    def start_monitoring(self, duration: int = 60):
+        """Start network monitoring."""
+        if not self.available:
+            console.print("[yellow]Scapy not available. Install with: pip3 install scapy[/yellow]")
+            return
+        
+        console.print(f"[cyan]Monitoring network traffic for {duration} seconds...[/cyan]")
         try:
-            sniff(iface=interface, prn=self.packet_handler, store=0, 
-                  filter="tcp", stop_filter=lambda x: not self.running)
+            sniff(prn=self.packet_callback, timeout=duration, store=0)
+        except PermissionError:
+            console.print("[red]Permission denied. Run with sudo for network monitoring.[/red]")
         except Exception as e:
             console.print(f"[red]Network monitoring error: {e}[/red]")
-    
-    def stop_monitoring(self):
-        """Stop network monitoring"""
-        self.running = False
 
 
-def get_risk_badge(score):
-    """Get risk badge based on score"""
-    if score < 30:
-        return "[green]🟩 SAFE[/green]"
-    elif score < 70:
-        return "[yellow]🟨 SUSPICIOUS[/yellow]"
-    else:
-        return "[red]🟥 ATTACK[/red]"
-
-
-def cmd_analyze(args):
-    """Analyze log files"""
-    console.print(Panel(BANNER, border_style="cyan"))
-    console.print("[bold cyan]🔍 Starting Log Analysis...[/bold cyan]\n")
+class Dashboard:
+    """Interactive TUI dashboard."""
     
-    db = Database()
-    geoip = GeoIPLookup()
-    analyzer = LogAnalyzer(db, geoip)
+    def __init__(self, db: Database, analyzer: LogAnalyzer, process_monitor: ProcessMonitor):
+        self.db = db
+        self.analyzer = analyzer
+        self.process_monitor = process_monitor
+        self.running = True
     
-    all_events = []
-    
-    # Analyze each log file
-    for log_name, log_path in LOG_PATHS.items():
-        if os.path.exists(log_path):
-            console.print(f"[cyan]📄 Analyzing {log_name}: {log_path}[/cyan]")
-            events = analyzer.analyze_file(log_path, lines=args.lines)
-            all_events.extend(events)
-    
-    # Detect anomalies
-    console.print(f"\n[bold yellow]🧠 Analyzing {len(all_events)} events...[/bold yellow]")
-    anomalies = analyzer.detect_anomalies(all_events)
-    
-    # Display results
-    if anomalies:
-        console.print(f"\n[bold red]⚠️  {len(anomalies)} ANOMALIES DETECTED![/bold red]\n")
-        
-        table = Table(title="Detected Anomalies", box=box.ROUNDED)
-        table.add_column("Type", style="red")
-        table.add_column("IP Address", style="yellow")
-        table.add_column("Attempts", style="cyan")
-        table.add_column("Severity", style="magenta")
-        
-        for anomaly in anomalies:
-            table.add_row(
-                anomaly['type'],
-                anomaly['ip'],
-                str(anomaly['attempts']),
-                anomaly['severity']
-            )
-        
-        console.print(table)
-    else:
-        console.print("\n[green]✅ No anomalies detected[/green]")
-    
-    # Display recent events
-    if all_events:
-        console.print(f"\n[bold cyan]📋 Recent Events (last {min(20, len(all_events))}):[/bold cyan]\n")
-        
-        table = Table(box=box.ROUNDED)
-        table.add_column("Time", style="dim")
-        table.add_column("IP", style="cyan")
-        table.add_column("Event", style="yellow")
-        table.add_column("User", style="green")
-        table.add_column("Location", style="magenta")
-        table.add_column("Risk", style="bold")
-        
-        for event in all_events[-20:]:
-            table.add_row(
-                event['timestamp'].split('T')[1][:8] if 'T' in event['timestamp'] else event['timestamp'][:8],
-                event['ip_address'],
-                event['event_type'],
-                event['username'],
-                f"{event['city']}, {event['country']}",
-                get_risk_badge(event['risk_score'])
-            )
-        
-        console.print(table)
-
-
-def cmd_live(args):
-    """Live monitoring mode"""
-    console.print(Panel(BANNER, border_style="cyan"))
-    console.print("[bold cyan]🚨 Starting Live Monitor...[/bold cyan]")
-    console.print("[dim]Press Ctrl+C to stop[/dim]\n")
-    
-    db = Database()
-    geoip = GeoIPLookup()
-    analyzer = LogAnalyzer(db, geoip)
-    
-    seen_ips = set()
-    
-    try:
-        while True:
-            # Monitor auth log
-            if os.path.exists(LOG_PATHS['auth']):
-                events = analyzer.analyze_file(LOG_PATHS['auth'], lines=10)
-                
-                for event in events:
-                    ip = event['ip_address']
-                    
-                    # Highlight new IPs
-                    if ip not in seen_ips:
-                        seen_ips.add(ip)
-                        console.print(f"[bold red]🆕 NEW IP DETECTED: {ip}[/bold red]")
-                    
-                    # Display event
-                    risk_badge = get_risk_badge(event['risk_score'])
-                    console.print(
-                        f"[dim]{event['timestamp'].split('T')[1][:8]}[/dim] "
-                        f"[cyan]{ip}[/cyan] "
-                        f"[yellow]{event['event_type']}[/yellow] "
-                        f"[green]{event['username']}[/green] "
-                        f"{risk_badge}"
-                    )
-            
-            time.sleep(args.interval)
-    
-    except KeyboardInterrupt:
-        console.print("\n[yellow]⏹️  Monitoring stopped[/yellow]")
-
-
-def cmd_dashboard(args):
-    """Interactive dashboard mode"""
-    console.print(Panel(BANNER, border_style="cyan"))
-    
-    db = Database()
-    
-    def generate_dashboard():
-        """Generate dashboard layout"""
+    def generate_layout(self) -> Layout:
+        """Generate dashboard layout."""
         layout = Layout()
+        
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="body"),
             Layout(name="footer", size=3)
         )
         
-        # Header
-        layout["header"].update(
-            Panel("[bold cyan]Jejak_Kuluk Dashboard[/bold cyan] - [dim]Real-time System Monitor[/dim]",
-                  border_style="cyan")
-        )
-        
-        # Body - IP Statistics
-        ip_stats = db.get_ip_stats()
-        
-        table = Table(title="Top Suspicious IPs", box=box.ROUNDED)
-        table.add_column("IP Address", style="cyan")
-        table.add_column("Total", style="yellow")
-        table.add_column("Failed", style="red")
-        table.add_column("First Seen", style="dim")
-        table.add_column("Last Seen", style="dim")
-        table.add_column("Country", style="green")
-        
-        for stat in ip_stats[:15]:
-            table.add_row(
-                stat[0],  # IP
-                str(stat[3]),  # Total attempts
-                str(stat[4]),  # Failed attempts
-                stat[1].split()[0] if stat[1] else 'N/A',  # First seen
-                stat[2].split()[0] if stat[2] else 'N/A',  # Last seen
-                stat[5] if stat[5] else 'Unknown'  # Country
-            )
-        
-        layout["body"].update(table)
-        
-        # Footer
-        layout["footer"].update(
-            Panel("[dim]Press Ctrl+C to exit | Refreshing every 5 seconds[/dim]",
-                  border_style="cyan")
+        layout["body"].split_row(
+            Layout(name="left"),
+            Layout(name="right")
         )
         
         return layout
     
-    try:
-        with Live(generate_dashboard(), refresh_per_second=0.2, console=console) as live:
-            while True:
-                time.sleep(5)
-                live.update(generate_dashboard())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Dashboard closed[/yellow]")
+    def generate_header(self) -> Panel:
+        """Generate header panel."""
+        header_text = Text()
+        header_text.append("Jejak_Kuluk Dashboard", style="bold cyan")
+        header_text.append(" | ", style="dim")
+        header_text.append(f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", style="yellow")
+        
+        return Panel(header_text, box=box.ROUNDED)
+    
+    def generate_events_table(self) -> Table:
+        """Generate recent events table."""
+        table = Table(title="Recent Security Events", box=box.ROUNDED, show_header=True, header_style="bold cyan")
+        
+        table.add_column("Time", style="yellow", width=12)
+        table.add_column("Type", style="cyan", width=15)
+        table.add_column("IP", style="magenta", width=15)
+        table.add_column("User", style="green", width=12)
+        table.add_column("Risk", style="red", width=8)
+        
+        events = self.db.get_events(limit=10)
+        
+        for event in events:
+            risk_score = event.get('risk_score', 0)
+            risk_color = "green" if risk_score < 40 else "yellow" if risk_score < 70 else "red"
+            risk_emoji = "🟩" if risk_score < 40 else "🟨" if risk_score < 70 else "🟥"
+            
+            table.add_row(
+                event.get('timestamp', '')[:12],
+                event.get('event_type', ''),
+                event.get('ip_address', 'N/A'),
+                event.get('username', 'N/A'),
+                f"{risk_emoji} {risk_score}"
+            )
+        
+        return table
+    
+    def generate_process_table(self) -> Table:
+        """Generate process monitoring table."""
+        table = Table(title="Process Monitor", box=box.ROUNDED, show_header=True, header_style="bold cyan")
+        
+        table.add_column("PID", style="yellow", width=8)
+        table.add_column("Name", style="cyan", width=20)
+        table.add_column("CPU%", style="green", width=8)
+        table.add_column("MEM%", style="blue", width=8)
+        table.add_column("Risk", style="red", width=10)
+        
+        processes = self.process_monitor.get_processes()[:10]
+        
+        for proc in processes:
+            risk_color = "green" if proc['risk_level'] == 'LOW' else "yellow" if proc['risk_level'] == 'MEDIUM' else "red"
+            
+            table.add_row(
+                str(proc['pid']),
+                proc['name'][:20],
+                f"{proc['cpu_percent']:.1f}",
+                f"{proc['memory_percent']:.1f}",
+                f"[{risk_color}]{proc['risk_level']}[/{risk_color}]"
+            )
+        
+        return table
+    
+    def generate_stats_panel(self) -> Panel:
+        """Generate statistics panel."""
+        events = self.db.get_events(limit=100)
+        
+        total_events = len(events)
+        failed_logins = sum(1 for e in events if e.get('event_type') == 'ssh_failed')
+        high_risk = sum(1 for e in events if e.get('risk_score', 0) > 70)
+        
+        stats_text = Text()
+        stats_text.append("Statistics\n", style="bold cyan")
+        stats_text.append(f"Total Events: {total_events}\n", style="yellow")
+        stats_text.append(f"Failed Logins: {failed_logins}\n", style="red")
+        stats_text.append(f"High Risk: {high_risk}\n", style="red bold")
+        
+        return Panel(stats_text, box=box.ROUNDED, title="Stats")
+    
+    def run(self):
+        """Run interactive dashboard."""
+        with Live(self.generate_layout(), refresh_per_second=1, console=console) as live:
+            while self.running:
+                try:
+                    layout = self.generate_layout()
+                    
+                    layout["header"].update(self.generate_header())
+                    layout["left"].update(self.generate_events_table())
+                    layout["right"].split_column(
+                        Layout(self.generate_process_table()),
+                        Layout(self.generate_stats_panel())
+                    )
+                    layout["footer"].update(Panel("Press Ctrl+C to exit", style="dim"))
+                    
+                    live.update(layout)
+                    time.sleep(1)
+                except KeyboardInterrupt:
+                    self.running = False
+                    break
 
 
-def cmd_export(args):
-    """Export report"""
-    console.print(Panel(BANNER, border_style="cyan"))
-    console.print("[bold cyan]📊 Generating Report...[/bold cyan]\n")
-    
-    db = Database()
-    events = db.get_events(limit=1000, hours=24)
-    
-    report_data = {
-        'generated_at': datetime.now().isoformat(),
-        'total_events': len(events),
-        'events': []
-    }
-    
-    for event in events:
-        report_data['events'].append({
-            'timestamp': event[1],
-            'ip': event[2],
-            'port': event[3],
-            'username': event[4],
-            'type': event[5],
-            'country': event[8],
-            'city': event[9],
-            'risk_score': event[11]
-        })
-    
-    # Save to file
-    filename = f"jejak_kuluk_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    
-    with open(filename, 'w') as f:
-        json.dump(report_data, f, indent=2)
-    
-    console.print(f"[green]✅ Report saved to: {filename}[/green]")
-    console.print(f"[cyan]📈 Total events: {len(events)}[/cyan]")
-
-
-def cmd_trace(args):
-    """Trace IP address"""
-    console.print(Panel(BANNER, border_style="cyan"))
-    console.print(f"[bold cyan]👁️  Tracing IP: {args.ip}[/bold cyan]\n")
+def analyze_command(args):
+    """Analyze system logs."""
+    console.print(BANNER)
+    console.print("[bold cyan]📊 Analyzing System Logs...[/bold cyan]\n")
     
     db = Database()
     geoip = GeoIPLookup()
+    analyzer = LogAnalyzer(geoip)
     
-    # Get GeoIP info
-    geo = geoip.lookup(args.ip)
-    console.print(f"[cyan]🌍 Location: {geo['city']}, {geo['country']}[/cyan]")
-    console.print(f"[cyan]🏢 ASN: {geo['asn']}[/cyan]\n")
+    # Parse authentication logs
+    with console.status("[cyan]Reading auth logs..."):
+        auth_lines = analyzer.read_log('auth', lines=args.lines)
+        auth_events = analyzer.parse_auth_log(auth_lines)
     
-    # Get events from database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM events WHERE ip_address = ? ORDER BY timestamp DESC', (args.ip,))
-    events = cursor.fetchall()
-    conn.close()
+    console.print(f"[green]✓[/green] Parsed {len(auth_events)} authentication events")
     
-    if events:
-        console.print(f"[yellow]📜 Found {len(events)} events:[/yellow]\n")
+    # Parse nginx logs if available
+    nginx_lines = analyzer.read_log('nginx_access', lines=args.lines)
+    if nginx_lines:
+        nginx_events = analyzer.parse_nginx_log(nginx_lines)
+        console.print(f"[green]✓[/green] Parsed {len(nginx_events)} HTTP requests")
+    else:
+        nginx_events = []
+    
+    all_events = auth_events + nginx_events
+    
+    # Store in database
+    with console.status("[cyan]Storing events in database..."):
+        for event in all_events:
+            db.insert_event(event)
+    
+    # Detect brute force
+    brute_force = analyzer.detect_brute_force(auth_events)
+    
+    # Display results
+    table = Table(title="Recent Security Events", box=box.ROUNDED, show_header=True, header_style="bold cyan")
+    table.add_column("Time", style="yellow")
+    table.add_column("Type", style="cyan")
+    table.add_column("IP", style="magenta")
+    table.add_column("User", style="green")
+    table.add_column("Location", style="blue")
+    table.add_column("Risk", style="red")
+    
+    for event in all_events[:20]:
+        risk_score = event['risk_score']
+        risk_emoji = "🟩" if risk_score < 40 else "🟨" if risk_score < 70 else "🟥"
         
-        table = Table(box=box.ROUNDED)
-        table.add_column("Timestamp", style="dim")
-        table.add_column("Event Type", style="yellow")
-        table.add_column("Username", style="green")
-        table.add_column("Port", style="cyan")
-        table.add_column("Risk", style="bold")
+        table.add_row(
+            event['timestamp'][:20],
+            event['event_type'],
+            event['ip_address'] or 'N/A',
+            event['username'] or 'N/A',
+            f"{event['country']}, {event['city']}",
+            f"{risk_emoji} {risk_score}"
+        )
+    
+    console.print("\n", table)
+    
+    # Display brute force alerts
+    if brute_force:
+        console.print("\n[bold red]🚨 BRUTE FORCE ATTACKS DETECTED:[/bold red]")
+        for alert in brute_force:
+            console.print(f"  [red]⚠️  IP: {alert['ip']} - {alert['attempts']} attempts[/red]")
+            console.print(f"     Usernames: {', '.join(alert['usernames'][:5])}")
+    
+    geoip.close()
+
+
+def live_command(args):
+    """Live monitoring mode."""
+    console.print(BANNER)
+    console.print("[bold cyan]🔴 Live Monitoring Mode (Press Ctrl+C to stop)[/bold cyan]\n")
+    
+    db = Database()
+    geoip = GeoIPLookup()
+    analyzer = LogAnalyzer(geoip)
+    
+    seen_events = set()
+    
+    try:
+        while True:
+            auth_lines = analyzer.read_log('auth', lines=50)
+            events = analyzer.parse_auth_log(auth_lines)
+            
+            for event in events:
+                fingerprint = event['fingerprint']
+                if fingerprint not in seen_events:
+                    seen_events.add(fingerprint)
+                    db.insert_event(event)
+                    
+                    risk_score = event['risk_score']
+                    risk_emoji = "🟩" if risk_score < 40 else "🟨" if risk_score < 70 else "🟥"
+                    
+                    console.print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {risk_emoji} "
+                                f"{event['event_type']} - {event['ip_address']} "
+                                f"({event['country']}) - Risk: {risk_score}")
+            
+            time.sleep(5)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Monitoring stopped.[/yellow]")
+    
+    geoip.close()
+
+
+def dashboard_command(args):
+    """Interactive dashboard mode."""
+    console.print(BANNER)
+    
+    db = Database()
+    geoip = GeoIPLookup()
+    analyzer = LogAnalyzer(geoip)
+    process_monitor = ProcessMonitor()
+    
+    dashboard = Dashboard(db, analyzer, process_monitor)
+    
+    try:
+        dashboard.run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard closed.[/yellow]")
+    
+    geoip.close()
+
+
+def process_command(args):
+    """Process anomaly monitoring."""
+    console.print(BANNER)
+    console.print("[bold cyan]🔍 Process Anomaly Monitor[/bold cyan]\n")
+    
+    monitor = ProcessMonitor()
+    db = Database()
+    
+    try:
+        while True:
+            processes = monitor.get_processes()
+            anomalies = monitor.detect_anomalies(processes)
+            
+            # Create table
+            table = Table(title="Running Processes (Top 20)", box=box.ROUNDED, show_header=True, header_style="bold cyan")
+            table.add_column("PID", style="yellow", width=8)
+            table.add_column("Name", style="cyan", width=25)
+            table.add_column("User", style="green", width=15)
+            table.add_column("CPU%", style="magenta", width=8)
+            table.add_column("MEM%", style="blue", width=8)
+            table.add_column("Connections", style="yellow", width=12)
+            table.add_column("Risk", style="red", width=10)
+            
+            for proc in processes[:20]:
+                risk_color = "green" if proc['risk_level'] == 'LOW' else "yellow" if proc['risk_level'] == 'MEDIUM' else "red"
+                name_color = "red bold" if proc['risk_level'] == 'HIGH' else "cyan"
+                
+                table.add_row(
+                    str(proc['pid']),
+                    f"[{name_color}]{proc['name'][:25]}[/{name_color}]",
+                    proc['username'][:15],
+                    f"{proc['cpu_percent']:.1f}",
+                    f"{proc['memory_percent']:.1f}",
+                    str(proc['connections']),
+                    f"[{risk_color}]{proc['risk_level']}[/{risk_color}]"
+                )
+            
+            console.clear()
+            console.print(BANNER)
+            console.print(f"[dim]Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]\n")
+            console.print(table)
+            
+            # Display anomalies
+            if anomalies:
+                console.print("\n[bold red]⚠️  ANOMALIES DETECTED:[/bold red]")
+                for proc in anomalies[:5]:
+                    console.print(f"  [red]• {proc['name']} (PID: {proc['pid']}) - {proc['risk_level']} risk[/red]")
+                    
+                    # Store in database
+                    db.insert_process_anomaly({
+                        'timestamp': datetime.datetime.now().isoformat(),
+                        'pid': proc['pid'],
+                        'name': proc['name'],
+                        'cpu_percent': proc['cpu_percent'],
+                        'memory_percent': proc['memory_percent'],
+                        'connections': proc['connections'],
+                        'risk_level': proc['risk_level']
+                    })
+            
+            console.print("\n[dim]Press Ctrl+C to exit[/dim]")
+            time.sleep(2)
+            
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Process monitor stopped.[/yellow]")
+
+
+def export_command(args):
+    """Export security report."""
+    console.print(BANNER)
+    console.print("[bold cyan]📤 Exporting Security Report...[/bold cyan]\n")
+    
+    db = Database()
+    events = db.get_events(limit=args.limit)
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if args.format == 'json':
+        filename = f"jejak_kuluk_report_{timestamp}.json"
+        with open(filename, 'w') as f:
+            json.dump(events, f, indent=2)
+        console.print(f"[green]✓[/green] Report exported to: {filename}")
+    
+    elif args.format == 'log':
+        filename = f"jejak_kuluk_report_{timestamp}.log"
+        with open(filename, 'w') as f:
+            f.write(f"Jejak_Kuluk Security Report - {datetime.datetime.now()}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            for event in events:
+                f.write(f"[{event.get('timestamp')}] {event.get('event_type')}\n")
+                f.write(f"  IP: {event.get('ip_address')} | User: {event.get('username')}\n")
+                f.write(f"  Location: {event.get('country')}, {event.get('city')}\n")
+                f.write(f"  Risk Score: {event.get('risk_score')}\n")
+                f.write(f"  Raw: {event.get('raw_log')}\n")
+                f.write("-" * 80 + "\n")
         
-        for event in events[:30]:
+        console.print(f"[green]✓[/green] Report exported to: {filename}")
+
+
+def trace_command(args):
+    """Trace and fingerprint intruders."""
+    console.print(BANNER)
+    console.print("[bold cyan]🔎 Tracing Intruder Activities...[/bold cyan]\n")
+    
+    db = Database()
+    
+    if args.ip:
+        # Trace specific IP
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM events WHERE ip_address = ? ORDER BY timestamp DESC", (args.ip,))
+        columns = [desc[0] for desc in cursor.description]
+        events = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        conn.close()
+        
+        if not events:
+            console.print(f"[yellow]No events found for IP: {args.ip}[/yellow]")
+            return
+        
+        console.print(f"[bold cyan]Fingerprint for IP: {args.ip}[/bold cyan]\n")
+        
+        # Statistics
+        event_types = Counter(e['event_type'] for e in events)
+        usernames = Counter(e['username'] for e in events if e['username'])
+        
+        console.print(f"[green]Total Events:[/green] {len(events)}")
+        console.print(f"[green]Location:[/green] {events[0]['country']}, {events[0]['city']}")
+        console.print(f"[green]Event Types:[/green] {dict(event_types)}")
+        console.print(f"[green]Attempted Usernames:[/green] {list(usernames.keys())[:10]}")
+        console.print(f"[green]First Seen:[/green] {events[-1]['timestamp']}")
+        console.print(f"[green]Last Seen:[/green] {events[0]['timestamp']}")
+        
+        # Timeline
+        console.print("\n[bold cyan]Timeline:[/bold cyan]")
+        table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
+        table.add_column("Time", style="yellow")
+        table.add_column("Event", style="cyan")
+        table.add_column("Details", style="green")
+        table.add_column("Risk", style="red")
+        
+        for event in events[:20]:
+            risk_emoji = "🟩" if event['risk_score'] < 40 else "🟨" if event['risk_score'] < 70 else "🟥"
             table.add_row(
-                event[1],
-                event[5],
-                event[4],
-                str(event[3]),
-                get_risk_badge(event[11])
+                event['timestamp'][:20],
+                event['event_type'],
+                event['username'] or 'N/A',
+                f"{risk_emoji} {event['risk_score']}"
             )
         
         console.print(table)
+    
     else:
-        console.print("[yellow]No events found for this IP[/yellow]")
+        # List all high-risk IPs
+        events = db.get_events(limit=1000)
+        high_risk_ips = defaultdict(list)
+        
+        for event in events:
+            if event['risk_score'] > 60 and event['ip_address']:
+                high_risk_ips[event['ip_address']].append(event)
+        
+        console.print("[bold red]High Risk IP Addresses:[/bold red]\n")
+        
+        table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
+        table.add_column("IP", style="magenta")
+        table.add_column("Events", style="yellow")
+        table.add_column("Location", style="blue")
+        table.add_column("Avg Risk", style="red")
+        
+        for ip, ip_events in sorted(high_risk_ips.items(), key=lambda x: len(x[1]), reverse=True)[:20]:
+            avg_risk = sum(e['risk_score'] for e in ip_events) / len(ip_events)
+            risk_emoji = "🟨" if avg_risk < 70 else "🟥"
+            
+            table.add_row(
+                ip,
+                str(len(ip_events)),
+                f"{ip_events[0]['country']}, {ip_events[0]['city']}",
+                f"{risk_emoji} {avg_risk:.0f}"
+            )
+        
+        console.print(table)
+        console.print(f"\n[dim]Use 'jejak_kuluk trace --ip <IP>' to see detailed fingerprint[/dim]")
 
 
 def main():
+    """Main entry point."""
     parser = argparse.ArgumentParser(
-        description='Jejak_Kuluk - Advanced Linux Defensive Cybersecurity Tool',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="Jejak_Kuluk - Advanced Defensive Cybersecurity Monitoring Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  jejak_kuluk analyze              Analyze system logs
+  jejak_kuluk live                 Start live monitoring
+  jejak_kuluk dashboard            Launch interactive dashboard
+  jejak_kuluk process              Monitor process anomalies
+  jejak_kuluk trace --ip 1.2.3.4   Trace specific IP
+  jejak_kuluk export --format json Export report to JSON
+        """
     )
     
-    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    parser.add_argument('--version', action='version', version=f'Jejak_Kuluk {VERSION}')
+    
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
     # Analyze command
-    parser_analyze = subparsers.add_parser('analyze', help='Analyze log files')
-    parser_analyze.add_argument('-l', '--lines', type=int, default=500,
-                               help='Number of lines to analyze per file')
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze system logs')
+    analyze_parser.add_argument('-l', '--lines', type=int, default=1000, help='Number of log lines to analyze')
     
     # Live command
-    parser_live = subparsers.add_parser('live', help='Live monitoring mode')
-    parser_live.add_argument('-i', '--interval', type=int, default=5,
-                            help='Refresh interval in seconds')
+    live_parser = subparsers.add_parser('live', help='Live monitoring mode')
     
     # Dashboard command
-    parser_dashboard = subparsers.add_parser('dashboard', help='Interactive dashboard')
+    dashboard_parser = subparsers.add_parser('dashboard', help='Interactive dashboard')
+    
+    # Process command
+    process_parser = subparsers.add_parser('process', help='Process anomaly monitor')
     
     # Export command
-    parser_export = subparsers.add_parser('export', help='Export report')
+    export_parser = subparsers.add_parser('export', help='Export security report')
+    export_parser.add_argument('-f', '--format', choices=['json', 'log'], default='json', help='Export format')
+    export_parser.add_argument('-l', '--limit', type=int, default=1000, help='Number of events to export')
     
     # Trace command
-    parser_trace = subparsers.add_parser('trace', help='Trace IP address')
-    parser_trace.add_argument('ip', help='IP address to trace')
+    trace_parser = subparsers.add_parser('trace', help='Trace intruder activities')
+    trace_parser.add_argument('-i', '--ip', help='IP address to trace')
     
     args = parser.parse_args()
     
     if not args.command:
-        console.print(Panel(BANNER, border_style="cyan"))
+        console.print(BANNER)
         parser.print_help()
         return
     
-    # Execute command
-    if args.command == 'analyze':
-        cmd_analyze(args)
-    elif args.command == 'live':
-        cmd_live(args)
-    elif args.command == 'dashboard':
-        cmd_dashboard(args)
-    elif args.command == 'export':
-        cmd_export(args)
-    elif args.command == 'trace':
-        cmd_trace(args)
+    # Route to appropriate command
+    commands = {
+        'analyze': analyze_command,
+        'live': live_command,
+        'dashboard': dashboard_command,
+        'process': process_command,
+        'export': export_command,
+        'trace': trace_command
+    }
+    
+    if args.command in commands:
+        try:
+            commands[args.command](args)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Operation cancelled.[/yellow]")
+        except Exception as e:
+            console.print(f"\n[red]Error: {e}[/red]")
+            if '--debug' in sys.argv:
+                raise
+    else:
+        parser.print_help()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
