@@ -1,296 +1,371 @@
-# Jejak_Kuluk 🔍
+# Jejak_Kuluk
 
- ▖   ▘  ▌   ▖▖  ▜   ▌ 
- ▌█▌ ▌▀▌▙▘  ▙▘▌▌▐ ▌▌▙▘
-▙▌▙▖ ▌█▌▛▖  ▌▌▙▌▐▖▙▌▛▖
-    ▙▌                                                                                                                                                         
-                             
+```
+   ____.       __          __           ____  __.      .__          __    
+  |    | ____ |__|____    |  | __      |    |/ _|__ __|  |  __ __ |  | __
+  |    |/ __ \|  \__  \   |  |/ /      |      < |  |  \  | |  |  \|  |/ /
+/\__|    \  ___/| |/ __ \_ |    <       |    |  \|  |  /  |_|  |  /    < 
+\________|\___  >__(____  / |__|_ \     |____|__ \____/|____/____/|__|_ \
+              \/        \/       \/             \/                      \/
+```
+
 **Created by:** Wayan_Choir  
 **Developed by:** Hornet Selem Team  
 **License:** MIT  
+**Version:** 1.0.0
 
 ---
 
-## 📖 Description
+## 🛡️ Description
 
-**Jejak_Kuluk** is a powerful all-in-one Linux defensive cybersecurity CLI tool designed to monitor, analyze, and fingerprint every action happening on your server. It helps system administrators identify intrusions, failed logins, brute-force attacks, IP origins, and trace unusual network activity — everything you need for forensic analysis and threat detection.
+**Jejak_Kuluk** (Indonesian for "Trace Footsteps") is a powerful all-in-one defensive cybersecurity CLI tool designed for Linux system administrators and security professionals. It monitors, analyzes, and fingerprints every action on your server to help detect intrusions, failed logins, brute-force attacks, suspicious network activity, and abnormal running processes.
 
-Whether you're managing a production server, investigating a security incident, or conducting routine audits, Jejak_Kuluk provides comprehensive visibility into your system's security posture.
+Built with a hacker-themed dark terminal design, Jejak_Kuluk provides real-time security insights, historical forensic analysis, and an interactive dashboard similar to `htop` for process anomaly detection.
+
+---
 
 ## ✨ Features
 
 | Category | Description |
 |----------|-------------|
-| 🔍 **Log Analyzer** | Read & display logs from `/var/log/auth.log`, syslog, nginx, apache, and more |
-| 🧠 **Anomaly Detection** | Detect failed logins, brute force attacks, SSH abuse, and strange access patterns |
-| 🌐 **IP & Geo Lookup** | Show IP origin (country, city, ASN/organization) using GeoIP |
-| ⚠️ **Risk Scoring** | Calculate and display threat levels: 🟩 Safe 🟨 Suspicious 🟥 Attack |
-| 🕒 **Timeline Monitor** | Show chronological activities in real-time |
-| 🚨 **Live Alert Mode** | Highlight new or unknown IPs in red with continuous monitoring |
-| 📜 **Fingerprint Capture** | Record IP, port, timestamp, username, user-agent, and raw log entries |
-| 📊 **Interactive Dashboard** | Terminal UI dashboard showing top suspicious IPs and statistics |
-| 🧾 **Export Reports** | Export daily reports in JSON format for further analysis |
-| 🛰️ **Scapy Integration** | Detect port scans and strange network traffic (optional) |
-| 💾 **SQLite Database** | Store historical events for forensic lookup and analysis |
-| 👁️ **Traceback Mode** | Backtrack intruder fingerprints using combined data (logs + network) |
+| 🔍 **Log Analyzer** | Parse and analyze logs from `/var/log/auth.log`, `syslog`, `nginx`, and custom sources |
+| 🧠 **Anomaly Detection** | Detect failed logins, brute-force attempts, SSH abuse, and suspicious access patterns |
+| 🌐 **IP & Geo Lookup** | Display IP origin with country, city, and ASN/organization information |
+| ⚠️ **Risk Scoring** | Intelligent threat level calculation: 🟩 Safe, 🟨 Suspicious, 🟥 Attack |
+| 🕒 **Timeline Monitor** | Chronological activity tracking in real-time |
+| 🚨 **Live Alert Mode** | Highlight new or unknown IPs with visual alerts |
+| 📜 **Fingerprint Capture** | Record IP, port, timestamp, username, user-agent, and raw log lines |
+| 📊 **Dashboard Mode (TUI)** | Interactive terminal dashboard using Rich library (htop-style) |
+| 🧾 **Export Reports** | Generate daily reports in JSON or LOG format |
+| 🛰️ **Network Monitoring** | Detect port scans and unusual traffic patterns with Scapy |
+| 💾 **SQLite Database** | Store historical events for forensic analysis and investigation |
+| 👁️ **Traceback Mode** | Investigate intruder fingerprints using combined log and network data |
+| 🧩 **Process Anomaly Monitor** | Display running processes with CPU/memory usage and risk assessment |
+
+---
 
 ## 🚀 Installation
 
-### Requirements
+### Prerequisites
 
-- **Python 3.7+**
-- **Root/Sudo access** (for reading system logs)
-- **Linux** (tested on Ubuntu, Debian, CentOS)
+- **Python 3.6+**
+- **Linux system** (Ubuntu, Debian, CentOS, etc.)
+- **Root/sudo access** (for reading system logs and network monitoring)
 
-### Quick Install
+### Method 1: Quick Install (One-liner)
 
-#### One-line installer:
 ```bash
 sudo curl -L https://github.com/wayanchoir/jejak_kuluk/raw/main/jejak_kuluk.py -o /usr/local/bin/jejak_kuluk && sudo chmod +x /usr/local/bin/jejak_kuluk
 ```
 
-#### Manual Installation:
+### Method 2: Manual Install
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/wayanchoir/jejak_kuluk.git
-   cd jejak_kuluk
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/wayanchoir/jejak_kuluk.git
+cd jejak_kuluk
 
-2. **Install dependencies:**
-   ```bash
-   pip3 install rich geoip2 scapy
-   ```
-   
-   Or using requirements file:
-   ```bash
-   pip3 install -r requirements.txt
-   ```
+# Install dependencies
+pip3 install rich psutil geoip2 scapy
 
-3. **Make executable:**
-   ```bash
-   chmod +x jejak_kuluk.py
-   ```
+# Make executable
+chmod +x jejak_kuluk.py
 
-4. **Optional: Install globally**
-   ```bash
-   sudo cp jejak_kuluk.py /usr/local/bin/jejak_kuluk
-   ```
+# Optional: Install system-wide
+sudo cp jejak_kuluk.py /usr/local/bin/jejak_kuluk
+```
 
-### Optional Dependencies
+### Optional: GeoIP Database
 
-- **GeoIP Database** (for IP geolocation):
-  ```bash
-  # Ubuntu/Debian
-  sudo apt install geoipupdate
-  
-  # Download GeoLite2 City database
-  # Register at https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
-  # and follow setup instructions
-  ```
+For IP geolocation features, download the GeoLite2 database:
 
-- **Scapy** (for network monitoring):
-  ```bash
-  pip3 install scapy
-  # May require additional system packages:
-  sudo apt install tcpdump libpcap-dev
-  ```
+```bash
+# Install GeoIP database
+sudo mkdir -p /usr/share/GeoIP
+cd /usr/share/GeoIP
+sudo wget https://git.io/GeoLite2-City.mmdb
+```
 
-## 📚 Usage
+---
+
+## 📖 Usage
 
 ### Basic Commands
 
 ```bash
-# Analyze system logs
-sudo jejak_kuluk analyze
-
-# Live monitoring mode
-sudo jejak_kuluk live
-
-# Interactive dashboard
-sudo jejak_kuluk dashboard
-
-# Export report
-sudo jejak_kuluk export
-
-# Trace specific IP
-sudo jejak_kuluk trace 192.168.1.100
-
-# Show help
+# Display help
 jejak_kuluk --help
+
+# Analyze system logs
+jejak_kuluk analyze
+
+# Analyze last 5000 log lines
+jejak_kuluk analyze --lines 5000
+
+# Start live monitoring mode
+jejak_kuluk live
+
+# Launch interactive dashboard
+jejak_kuluk dashboard
+
+# Monitor process anomalies (like top)
+jejak_kuluk process
+
+# Trace specific IP address
+jejak_kuluk trace --ip 192.168.1.100
+
+# List all high-risk IPs
+jejak_kuluk trace
+
+# Export report to JSON
+jejak_kuluk export --format json
+
+# Export report to log file
+jejak_kuluk export --format log --limit 5000
 ```
 
-### Command Examples
+### Command Details
 
-#### 1. **Analyze Logs**
-Scan and analyze system logs for security events:
+#### 📊 `analyze` - Log Analysis
+
+Parses authentication logs, SSH attempts, sudo commands, and nginx requests. Detects brute-force attacks and suspicious patterns.
+
 ```bash
-sudo jejak_kuluk analyze --lines 1000
+sudo jejak_kuluk analyze
 ```
-This will:
-- Parse auth.log, syslog, nginx, and apache logs
-- Detect failed login attempts
-- Identify brute force attacks
-- Display risk scores for each event
 
-#### 2. **Live Monitoring**
-Monitor logs in real-time and get instant alerts:
+**Output:**
+- Recent security events table
+- Brute-force attack alerts
+- Risk scores with color coding
+- Geographic information
+
+#### 🔴 `live` - Real-time Monitoring
+
+Continuously monitors logs and displays new events as they occur.
+
 ```bash
-sudo jejak_kuluk live --interval 3
+sudo jejak_kuluk live
 ```
-Features:
-- 🆕 Highlights new IPs in red
-- ⚠️ Shows risk levels for each event
-- 🔄 Auto-refreshes every N seconds
 
-#### 3. **Interactive Dashboard**
-View top suspicious IPs and statistics:
+**Features:**
+- Real-time event streaming
+- Automatic database storage
+- Color-coded risk levels
+- Press Ctrl+C to stop
+
+#### 🖥️ `dashboard` - Interactive Dashboard
+
+Launches a full-screen TUI dashboard with live updates.
+
 ```bash
 sudo jejak_kuluk dashboard
 ```
-Displays:
-- Top 15 suspicious IP addresses
-- Total and failed attempt counts
-- Geographic locations
-- First and last seen timestamps
 
-#### 4. **Export Reports**
-Generate forensic reports for documentation:
+**Panels:**
+- Recent security events
+- Process monitor (top 10)
+- Statistics overview
+- Auto-refresh every second
+
+#### 🔍 `process` - Process Anomaly Monitor
+
+Displays running processes with risk assessment, similar to `top` or `htop`.
+
 ```bash
-sudo jejak_kuluk export
+jejak_kuluk process
 ```
-Creates a JSON file with:
-- All events from last 24 hours
-- IP addresses and locations
-- Risk scores and event types
-- Timestamp: `jejak_kuluk_report_20250106_143022.json`
 
-#### 5. **IP Tracing**
-Investigate a specific IP address:
+**Detects:**
+- Suspicious process names
+- High CPU/memory usage
+- Unusual network connections
+- Known attack tools (netcat, cryptominers, etc.)
+
+#### 🕵️ `trace` - Intruder Fingerprinting
+
+Investigates specific IP addresses or lists high-risk attackers.
+
 ```bash
-sudo jejak_kuluk trace 203.0.113.42
-```
-Shows:
-- Geographic location (city, country)
-- ASN/Organization
-- All historical events from this IP
-- Risk assessment
+# Trace specific IP
+jejak_kuluk trace --ip 203.0.113.42
 
-## 📁 Directory Structure
+# List all high-risk IPs
+jejak_kuluk trace
+```
+
+**Shows:**
+- Total events from IP
+- Geographic location
+- Event timeline
+- Attack patterns
+- Attempted usernames
+
+#### 📤 `export` - Report Generation
+
+Exports security data for compliance, auditing, or analysis.
+
+```bash
+# Export to JSON
+jejak_kuluk export --format json --limit 1000
+
+# Export to log file
+jejak_kuluk export --format log
+```
+
+---
+
+## 🗂️ Project Structure
 
 ```
 jejak_kuluk/
-├── jejak_kuluk.py          # Main application (single file)
+├── jejak_kuluk.py          # Single-file application
 ├── README.md               # This file
-├── LICENSE                 # MIT License
-└── requirements.txt        # Python dependencies
+└── ~/.jejak_kuluk.db       # SQLite database (auto-created)
 ```
 
-The tool creates a SQLite database at `~/.jejak_kuluk.db` to store event history.
+### Database Schema
 
-## 🎯 Use Cases
+**events** table:
+- `id`, `timestamp`, `event_type`, `ip_address`, `username`
+- `port`, `country`, `city`, `risk_score`, `raw_log`, `fingerprint`
 
-### 1. **Security Auditing**
-- Daily security checks
-- Compliance reporting
-- Incident investigation
+**process_anomalies** table:
+- `id`, `timestamp`, `pid`, `name`, `cpu_percent`
+- `memory_percent`, `connections`, `risk_level`
 
-### 2. **Intrusion Detection**
-- Real-time SSH brute force detection
-- Port scan identification
-- Suspicious IP tracking
+---
 
-### 3. **Forensic Analysis**
-- Historical event lookup
-- IP reputation tracking
-- Attack pattern analysis
+## 🎨 Screenshots
 
-### 4. **System Administration**
-- Monitor user logins
-- Track failed authentication attempts
-- Identify compromised accounts
+### Analyze Mode
+```
+Recent Security Events
+┌────────────┬─────────────────┬─────────────────┬──────────────┬──────────────┐
+│ Time       │ Type            │ IP              │ User         │ Risk         │
+├────────────┼─────────────────┼─────────────────┼──────────────┼──────────────┤
+│ Nov 06 ... │ ssh_failed      │ 203.0.113.42    │ root         │ 🟥 70        │
+│ Nov 06 ... │ ssh_failed      │ 203.0.113.42    │ admin        │ 🟥 70        │
+│ Nov 06 ... │ ssh_accepted    │ 192.168.1.100   │ sysadmin     │ 🟩 30        │
+└────────────┴─────────────────┴─────────────────┴──────────────┴──────────────┘
+
+🚨 BRUTE FORCE ATTACKS DETECTED:
+  ⚠️  IP: 203.0.113.42 - 15 attempts
+     Usernames: root, admin, user, test, ubuntu
+```
+
+### Process Monitor
+```
+Running Processes (Top 20)
+┌─────────┬──────────────────┬──────────┬────────┬────────┬──────────────┬────────┐
+│ PID     │ Name             │ User     │ CPU%   │ MEM%   │ Connections  │ Risk   │
+├─────────┼──────────────────┼──────────┼────────┼────────┼──────────────┼────────┤
+│ 1337    │ nginx            │ www-data │ 45.2   │ 12.3   │ 24           │ LOW    │
+│ 2048    │ python3          │ root     │ 23.1   │ 8.7    │ 2            │ LOW    │
+│ 6666    │ suspicious_proc  │ unknown  │ 85.4   │ 45.2   │ 127          │ HIGH   │
+└─────────┴──────────────────┴──────────┴────────┴────────┴──────────────┴────────┘
+```
+
+---
 
 ## 🔧 Configuration
 
-### Log Paths
-The tool monitors these log files by default:
-- `/var/log/auth.log` - SSH and authentication logs
-- `/var/log/syslog` - System logs
-- `/var/log/nginx/access.log` - Nginx web server
-- `/var/log/nginx/error.log` - Nginx errors
-- `/var/log/apache2/access.log` - Apache web server
-- `/var/log/apache2/error.log` - Apache errors
+Jejak_Kuluk works out of the box with sensible defaults. Advanced users can modify:
 
-### Database
-Events are stored in SQLite at: `~/.jejak_kuluk.db`
+- **Log paths:** Edit `log_paths` dictionary in `LogAnalyzer` class
+- **Risk thresholds:** Modify `_calculate_risk()` method
+- **Brute-force detection:** Adjust `threshold` in `detect_brute_force()`
+- **Suspicious patterns:** Update `suspicious_patterns` in `ProcessMonitor`
 
-To reset the database:
-```bash
-rm ~/.jejak_kuluk.db
-```
-
-## 🛡️ Security Considerations
-
-- **Run with sudo**: Log files require root access
-- **Sensitive data**: Reports may contain IP addresses and usernames
-- **Network monitoring**: Scapy features require elevated privileges
-- **Log retention**: Database grows over time; implement rotation if needed
+---
 
 ## 🤝 Contributing
 
-We welcome contributions! Here's how you can help:
+We welcome contributions from the community! Here's how you can help:
 
-1. **Fork the repository**
-2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
-3. **Commit your changes**: `git commit -m 'Add amazing feature'`
-4. **Push to the branch**: `git push origin feature/amazing-feature`
-5. **Open a Pull Request**
+### Ways to Contribute
 
-### Areas for Contribution
-- Additional log parsers (Docker, PostgreSQL, etc.)
-- Integration with SIEM systems
-- Enhanced anomaly detection algorithms
-- Web dashboard interface
-- Alert notification system (email, Slack, Telegram)
-- Machine learning for threat detection
+1. **Report Bugs:** Open an issue describing the bug and steps to reproduce
+2. **Feature Requests:** Suggest new features or improvements
+3. **Code Contributions:** Submit pull requests with bug fixes or new features
+4. **Documentation:** Improve README, add examples, or create tutorials
+5. **Testing:** Test on different Linux distributions and report compatibility
 
-## 🐛 Bug Reports
+### Development Guidelines
 
-Found a bug? Please open an issue with:
-- Description of the problem
-- Steps to reproduce
-- Expected vs actual behavior
-- System information (OS, Python version)
-- Log snippets (if applicable)
+```bash
+# Fork the repository
+git clone https://github.com/YOUR_USERNAME/jejak_kuluk.git
+cd jejak_kuluk
 
-## 📝 Changelog
+# Create a feature branch
+git checkout -b feature/amazing-feature
 
-### v1.0.0 (2025-01-06)
-- Initial release
-- Core log analysis functionality
-- Live monitoring mode
-- Interactive dashboard
-- IP geolocation support
-- SQLite event storage
-- Export to JSON
-- IP tracing capability
+# Make your changes
+# Test thoroughly
 
-## 🙏 Credits
+# Commit with clear messages
+git commit -m "Add amazing feature: detailed description"
 
-**Created by:** Wayan_Choir  
-**Developed by:** Hornet Selem Team  
+# Push and create pull request
+git push origin feature/amazing-feature
+```
 
-Special thanks to:
-- The Python community
-- Rich library by Will McGugan
-- MaxMind for GeoLite2 database
-- All contributors and testers
+### Code Style
 
-## 📄 License
+- Follow PEP 8 Python style guidelines
+- Add docstrings to all functions and classes
+- Include comments for complex logic
+- Maintain the single-file architecture
+- Test with `sudo` privileges where required
+
+---
+
+## 🐛 Known Issues
+
+- **GeoIP Database:** Requires manual download for full geolocation features
+- **Scapy Permissions:** Network monitoring requires root/sudo access
+- **Log Access:** Reading system logs requires appropriate permissions
+- **Python 3.6+:** Not compatible with Python 2.x
+
+---
+
+## 📋 Requirements
+
+### Required Libraries
+```
+rich>=10.0.0
+psutil>=5.8.0
+```
+
+### Optional Libraries
+```
+geoip2>=4.0.0        # For IP geolocation
+scapy>=2.4.0         # For network monitoring
+```
+
+### Install All Dependencies
+```bash
+pip3 install rich psutil geoip2 scapy
+```
+
+---
+
+## 🔒 Security Considerations
+
+- **Run with Caution:** This tool requires elevated privileges to read system logs
+- **Database Security:** The SQLite database (`~/.jejak_kuluk.db`) contains sensitive security data
+- **Network Monitoring:** Scapy packet capture may impact network performance
+- **False Positives:** Review alerts carefully; not all flagged activity is malicious
+- **Legal Compliance:** Ensure monitoring complies with your organization's policies
+
+---
+
+## 📜 License
 
 MIT License
 
-Copyright (c) 2025 Wayan_Choir
+Copyright (c) 2024 Wayan_Choir & Hornet Selem Team
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -312,16 +387,59 @@ SOFTWARE.
 
 ---
 
-## 🌟 Star Us!
+## 🌟 Credits
 
-If you find Jejak_Kuluk useful, please give us a ⭐ on GitHub!
+**Created by:** Wayan_Choir  
+**Developed by:** Hornet Selem Team  
+**Contributors:** Open Source Community
 
-## 🔗 Links
+### Special Thanks
 
-- **GitHub Repository**: https://github.com/wayanchoir/jejak_kuluk
-- **Issue Tracker**: https://github.com/wayanchoir/jejak_kuluk/issues
-- **Documentation**: https://github.com/wayanchoir/jejak_kuluk/wiki
+- **Rich Library:** For beautiful terminal formatting
+- **psutil:** For cross-platform process utilities
+- **Scapy:** For powerful packet manipulation
+- **GeoIP2:** For IP geolocation services
 
 ---
 
-**Made with ❤️ by Hornet Selem Team**
+## 📞 Support
+
+- **Issues:** [GitHub Issues](https://github.com/wayanchoir/jejak_kuluk/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/wayanchoir/jejak_kuluk/discussions)
+- **Email:** wayanchoir@example.com
+
+---
+
+## 🚀 Roadmap
+
+- [ ] Web-based dashboard interface
+- [ ] Email/Telegram alert notifications
+- [ ] Integration with SIEM systems
+- [ ] Machine learning-based anomaly detection
+- [ ] Docker container support
+- [ ] Multi-server monitoring
+- [ ] Custom rule engine
+- [ ] Plugin architecture
+
+---
+
+## 📊 Statistics
+
+![GitHub stars](https://img.shields.io/github/stars/wayanchoir/jejak_kuluk?style=social)
+![GitHub forks](https://img.shields.io/github/forks/wayanchoir/jejak_kuluk?style=social)
+![GitHub issues](https://img.shields.io/github/issues/wayanchoir/jejak_kuluk)
+![GitHub license](https://img.shields.io/github/license/wayanchoir/jejak_kuluk)
+![Python version](https://img.shields.io/badge/python-3.6+-blue.svg)
+
+---
+
+**⭐ If you find Jejak_Kuluk useful, please star the repository!**
+
+**🤝 Contributions are welcome! Help us make server security better for everyone.**
+
+---
+
+```
+Made with ❤️ by the Hornet Selem Team
+For defenders, by defenders.
+```
