@@ -12,7 +12,7 @@
 **Created by:** Wayan_Choir  
 **Developed by:** Hornet Selem Team  
 **License:** MIT  
-**Version:** 1.0.0
+**Version:** 1.0.3
 
 ---
 
@@ -55,14 +55,14 @@ Built with a hacker-themed dark terminal design, Jejak_Kuluk provides real-time 
 ### Method 1: Quick Install (One-liner)
 
 ```bash
-sudo curl -L https://github.com/wayanchoir/jejak_kuluk/raw/main/jejak_kuluk.py -o /usr/local/bin/jejak_kuluk && sudo chmod +x /usr/local/bin/jejak_kuluk
+sudo curl -L https://github.com/Taicicaks01/jejak_kuluk/raw/main/jejak_kuluk.py -o /usr/local/bin/jejak_kuluk && sudo chmod +x /usr/local/bin/jejak_kuluk
 ```
 
 ### Method 2: Manual Install
 
 ```bash
 # Clone the repository
-git clone https://github.com/wayanchoir/jejak_kuluk.git
+git clone https://github.com/Taicicaks01/jejak_kuluk.git
 cd jejak_kuluk
 
 # Install dependencies
@@ -425,10 +425,10 @@ SOFTWARE.
 
 ## 📊 Statistics
 
-![GitHub stars](https://img.shields.io/github/stars/wayanchoir/jejak_kuluk?style=social)
-![GitHub forks](https://img.shields.io/github/forks/wayanchoir/jejak_kuluk?style=social)
-![GitHub issues](https://img.shields.io/github/issues/wayanchoir/jejak_kuluk)
-![GitHub license](https://img.shields.io/github/license/wayanchoir/jejak_kuluk)
+![GitHub stars](https://img.shields.io/github/stars/Taicicaks01/jejak_kuluk?style=social)
+![GitHub forks](https://img.shields.io/github/forks/Taicicaks01/jejak_kuluk?style=social)
+![GitHub issues](https://img.shields.io/github/issues/Taicicaks01/jejak_kuluk)
+![GitHub license](https://img.shields.io/github/license/Taicicaks01/jejak_kuluk)
 ![Python version](https://img.shields.io/badge/python-3.6+-blue.svg)
 
 ---
